@@ -17,9 +17,5 @@ processors:
 
 exporters:
   - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.142.0
-  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.0.0
+  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.1.0
     name: icebergexporter
-
-replaces:
-  # All paths are relative to output_path (dist/)
-  - github.com/terakoya76/opentelemetry-iceberg-exporter => ../
