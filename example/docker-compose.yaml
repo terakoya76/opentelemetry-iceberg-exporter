@@ -1,0 +1,158 @@
+services:
+  # Custom OpenTelemetry Collector with Iceberg Exporter
+  otel-collector:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "13133:13133" # Health check
+    environment:
+      - S3_BUCKET=${S3_BUCKET:-otel}
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-minioadmin}
+    command: --config /app/config.yaml
+    volumes:
+      - ./otel-config.yaml:/app/config.yaml
+    networks:
+      - demo-network
+    depends_on:
+      minio:
+        condition: service_healthy
+      nessie:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13133"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Nessie Iceberg REST Catalog
+  nessie:
+    image: ghcr.io/projectnessie/nessie:latest
+    ports:
+      - "19120:19120"
+    environment:
+      # Nessie version store (IN_MEMORY for demo, use JDBC/ROCKSDB for persistence)
+      - nessie.version.store.type=IN_MEMORY
+      - quarkus.http.port=19120
+      # Catalog/Warehouse configuration
+      # The warehouse name "warehouse" maps to the S3 location
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3://otel/warehouse
+      # S3/MinIO object store configuration
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000
+      - nessie.catalog.service.s3.default-options.path-style-access=true
+      - nessie.catalog.service.s3.default-options.region=us-east-1
+      # Explicitly set auth-type to STATIC for MinIO credentials
+      - nessie.catalog.service.s3.default-options.auth-type=STATIC
+      # MinIO credentials using Quarkus config secrets
+      # The URN points to nessie.catalog.secrets.access-key, which resolves to:
+      # - nessie.catalog.secrets.access-key.name (access key ID)
+      # - nessie.catalog.secrets.access-key.secret (secret access key)
+      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
+      - nessie.catalog.secrets.access-key.name=minioadmin
+      - nessie.catalog.secrets.access-key.secret=minioadmin
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - demo-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v2/config"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # MinIO for local S3-compatible storage (for testing)
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - demo-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Create default bucket on startup
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/otel --ignore-existing;
+      echo 'Bucket created successfully';
+      "
+    networks:
+      - demo-network
+
+  # Telemetrygen for generating sample traces
+  telemetrygen-traces:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    networks:
+      - demo-network
+    depends_on:
+      - otel-collector
+    command:
+      - traces
+      - --otlp-endpoint=otel-collector:4317
+      - --otlp-insecure
+      - --duration=60s
+      - --rate=10
+      - --service=telemetrygen-traces
+      - --status-code=Ok
+
+  # Telemetrygen for generating sample metrics
+  telemetrygen-metrics:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    networks:
+      - demo-network
+    depends_on:
+      - otel-collector
+    command:
+      - metrics
+      - --otlp-endpoint=otel-collector:4317
+      - --otlp-insecure
+      - --duration=60s
+      - --rate=2
+      - --service=telemetrygen-metrics
+
+  # Telemetrygen for generating sample logs
+  telemetrygen-logs:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    networks:
+      - demo-network
+    depends_on:
+      - otel-collector
+    command:
+      - logs
+      - --otlp-endpoint=otel-collector:4317
+      - --otlp-insecure
+      - --duration=60s
+      - --rate=2
+      - --service=telemetrygen-logs
+
+networks:
+  demo-network:
+    driver: bridge
+
+volumes:
+  minio-data:

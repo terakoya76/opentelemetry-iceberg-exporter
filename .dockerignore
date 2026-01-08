@@ -1,0 +1,6 @@
+*
+!go.mod
+!go.sum
+!builder-config.yaml
+!*.go
+!internal

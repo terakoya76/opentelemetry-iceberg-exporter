@@ -1,0 +1,95 @@
+# OpenTelemetry Collector Configuration with Iceberg Exporter
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+    send_batch_max_size: 512
+
+  memory_limiter:
+    limit_mib: 256
+    check_interval: 1s
+    spike_limit_mib: 64
+
+exporters:
+  debug:
+    verbosity: normal
+    sampling_initial: 2
+    sampling_thereafter: 100
+
+  iceberg:
+    # Storage configuration (where Parquet files are written)
+    storage:
+      type: s3  # "s3", "r2", or "filesystem"
+      s3:
+        region: ${env:AWS_REGION:-us-east-1}
+        bucket: ${env:S3_BUCKET}
+        endpoint: ${env:S3_ENDPOINT:-}
+        access_key_id: ${env:AWS_ACCESS_KEY_ID}
+        secret_access_key: ${env:AWS_SECRET_ACCESS_KEY}
+        compression: zstd
+
+    # Iceberg catalog configuration (required)
+    # type must be explicitly set: "rest" for Iceberg catalog, or "none" to disable
+    catalog:
+      type: rest  # "rest" or "none" (required - no default)
+      namespace: ${env:ICEBERG_NAMESPACE:-default}
+      # REST catalog settings (required when type is "rest")
+      rest:
+        uri: ${env:ICEBERG_REST_URI:-http://nessie:19120/iceberg}
+        # Warehouse name (not location) - must match Nessie's configured warehouse name
+        warehouse: ${env:ICEBERG_WAREHOUSE:-warehouse}
+        # Bearer token for authentication (optional)
+        # token: ${env:ICEBERG_REST_TOKEN:-}
+      # Table name overrides
+      tables:
+        traces: otel_traces
+        logs: otel_logs
+        metrics: otel_metrics
+    # To disable catalog registration (Parquet-only mode), use:
+    # catalog:
+    #   type: none
+
+    # Partition configuration
+    partition:
+      granularity: hourly  # "hourly", "daily", "monthly"
+      timezone: UTC
+
+    # Standard exporter settings
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 300s
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [iceberg, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [iceberg, debug]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [iceberg, debug]

@@ -1,0 +1,20 @@
+# Binary
+otelcol-iceberg
+otel-iceberg-collector
+main
+
+# Generated collector code
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Test outputs
+*.test
+coverage.out
