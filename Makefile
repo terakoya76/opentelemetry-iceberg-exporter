@@ -1,4 +1,4 @@
-.PHONY: build test clean docker-build docker-up docker-down lint fmt install-builder generate
+.PHONY: build test clean docker-build docker-tag docker-push docker-up docker-down lint fmt install-builder generate
 
 # Go parameters
 GOCMD=go
@@ -6,7 +6,12 @@ GOBUILD=$(GOCMD) build
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
-BINARY_NAME=otelcol-iceberg
+BINARY_NAME=opentelemetry-collector
+
+# Docker parameters
+DOCKER_IMAGE=opentelemetry-collector
+DOCKER_REGISTRY=ghcr.io/terakoya76/opentelemetry-iceberg-exporter
+DOCKER_TAG=latest
 
 # OpenTelemetry Collector Builder version (must match otelcol_version in builder-config.yaml)
 OCB_VERSION=0.142.0
@@ -47,7 +52,13 @@ tidy:
 	$(GOMOD) tidy
 
 docker-build:
-	docker build -t otel-iceberg-collector:latest .
+	docker build -t $(DOCKER_IMAGE):latest .
+
+docker-tag:
+	docker tag $(DOCKER_IMAGE):latest $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(DOCKER_TAG)
+
+docker-push:
+	docker push $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(DOCKER_TAG)
 
 docker-up:
 	docker-compose -f example/docker-compose.yaml up -d

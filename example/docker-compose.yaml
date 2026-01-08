@@ -1,6 +1,7 @@
 services:
   # Custom OpenTelemetry Collector with Iceberg Exporter
   otel-collector:
+    image: opentelemetry-collector:latest
     build:
       context: ..
       dockerfile: Dockerfile

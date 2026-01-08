@@ -525,6 +525,22 @@ Common fields plus:
 | quantile_values.quantile | List[Float64] | No | Quantile values (e.g., 0.5, 0.99) |
 | quantile_values.value | List[Float64] | No | Values at each quantile |
 
+## Development
+
+### Publish Docker Image
+
+Publish latest and v0.1.0 tag
+
+```sh
+cat <GHCR_PAT> | docker login ghcr.io -u terakoya76 --password-stdin
+
+make docker-build
+make docker-tag
+make docker-tag DOCKER_TAG=v0.142.0.1
+make docker-push
+make docker-push DOCKER_TAG=v0.142.0.1
+```
+
 ## License
 
 Apache-2.0

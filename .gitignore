@@ -1,6 +1,5 @@
 # Binary
-otelcol-iceberg
-otel-iceberg-collector
+opentelemetry-collector
 main
 
 # Generated collector code
