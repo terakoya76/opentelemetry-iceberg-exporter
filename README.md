@@ -529,16 +529,14 @@ Common fields plus:
 
 ### Publish Docker Image
 
-Publish latest and v0.1.0 tag
-
 ```sh
 cat <GHCR_PAT> | docker login ghcr.io -u terakoya76 --password-stdin
 
 make docker-build
 make docker-tag
-make docker-tag DOCKER_TAG=v0.142.0.1
+make docker-tag DOCKER_TAG=v0.142.0.2
 make docker-push
-make docker-push DOCKER_TAG=v0.142.0.1
+make docker-push DOCKER_TAG=v0.142.0.2
 ```
 
 ## License
