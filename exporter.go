@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/arrow"
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
 const exporterName = "opentelemetry-iceberg-exporter"
@@ -22,7 +23,7 @@ const exporterName = "opentelemetry-iceberg-exporter"
 // icebergExporter exports telemetry data to Parquet files with Iceberg catalog support.
 type icebergExporter struct {
 	config *Config
-	logger *zap.Logger
+	logger *logger.VerboseLogger
 	writer *IcebergWriter
 
 	// Arrow converters
@@ -37,10 +38,11 @@ type icebergExporter struct {
 // newIcebergExporter creates a new Iceberg exporter.
 func newIcebergExporter(cfg *Config, set exporter.Settings) (*icebergExporter, error) {
 	allocator := memory.NewGoAllocator()
+	vlogger := logger.New(set.Logger, cfg.Verbosity)
 
 	return &icebergExporter{
 		config:           cfg,
-		logger:           set.Logger,
+		logger:           vlogger,
 		allocator:        allocator,
 		tracesConverter:  arrow.NewTracesConverter(allocator),
 		metricsConverter: arrow.NewMetricsConverter(allocator),
@@ -67,6 +69,7 @@ func (e *icebergExporter) start(ctx context.Context, _ component.Host) error {
 	e.logger.Info("Iceberg exporter started",
 		zap.String("storage_type", w.GetStorageType()),
 		zap.String("catalog_type", w.GetCatalogType()),
+		zap.String("verbosity", e.config.Verbosity.String()),
 	)
 
 	return nil
@@ -118,10 +121,7 @@ func (e *icebergExporter) consumeTraces(ctx context.Context, traces ptrace.Trace
 		return fmt.Errorf("failed to write traces: %w", err)
 	}
 
-	e.logger.Debug("Exported traces",
-		zap.Int("spans", traces.SpanCount()),
-		zap.Int("bytes", len(data)),
-	)
+	e.logTracesExport(traces, data, serviceName)
 
 	return nil
 }
@@ -180,11 +180,7 @@ func (e *icebergExporter) consumeMetrics(ctx context.Context, metrics pmetric.Me
 		totalRecords += record.NumRows()
 	})
 
-	e.logger.Debug("Exported metrics",
-		zap.Int("datapoints", metrics.DataPointCount()),
-		zap.Int64("records_written", totalRecords),
-		zap.Int("bytes", totalBytes),
-	)
+	e.logMetricsExport(metrics, totalBytes, totalRecords, serviceName)
 
 	return nil
 }
@@ -227,10 +223,7 @@ func (e *icebergExporter) consumeLogs(ctx context.Context, logs plog.Logs) error
 		return fmt.Errorf("failed to write logs: %w", err)
 	}
 
-	e.logger.Debug("Exported logs",
-		zap.Int("records", logs.LogRecordCount()),
-		zap.Int("bytes", len(data)),
-	)
+	e.logLogsExport(logs, data, serviceName)
 
 	return nil
 }
@@ -285,4 +278,60 @@ func extractServiceNameFromLogs(logs plog.Logs) string {
 		return val.AsString()
 	}
 	return ""
+}
+
+// logTracesExport logs trace export information based on verbosity level.
+func (e *icebergExporter) logTracesExport(traces ptrace.Traces, data []byte, serviceName string) {
+	if e.logger.IsNormal() {
+		// LevelNormal: log basic counts at Info level
+		e.logger.Info("Traces exported",
+			zap.Int("spans", traces.SpanCount()),
+		)
+	} else if e.logger.IsDetailed() {
+		// LevelDetailed: log full details at Info level
+		e.logger.Info("Traces exported",
+			zap.Int("spans", traces.SpanCount()),
+			zap.Int("bytes", len(data)),
+			zap.String("service_name", serviceName),
+			zap.Int("resource_spans", traces.ResourceSpans().Len()),
+		)
+	}
+}
+
+// logMetricsExport logs metrics export information based on verbosity level.
+func (e *icebergExporter) logMetricsExport(metrics pmetric.Metrics, totalBytes int, totalRecords int64, serviceName string) {
+	if e.logger.IsNormal() {
+		// LevelNormal: log basic counts at Info level
+		e.logger.Info("Metrics exported",
+			zap.Int("datapoints", metrics.DataPointCount()),
+		)
+	} else if e.logger.IsDetailed() {
+		// LevelDetailed: log full details at Info level
+		e.logger.Info("Metrics exported",
+			zap.Int("datapoints", metrics.DataPointCount()),
+			zap.Int("metric_count", metrics.MetricCount()),
+			zap.Int64("records_written", totalRecords),
+			zap.Int("bytes", totalBytes),
+			zap.String("service_name", serviceName),
+			zap.Int("resource_metrics", metrics.ResourceMetrics().Len()),
+		)
+	}
+}
+
+// logLogsExport logs log export information based on verbosity level.
+func (e *icebergExporter) logLogsExport(logs plog.Logs, data []byte, serviceName string) {
+	if e.logger.IsNormal() {
+		// LevelNormal: log basic counts at Info level
+		e.logger.Info("Logs exported",
+			zap.Int("records", logs.LogRecordCount()),
+		)
+	} else if e.logger.IsDetailed() {
+		// LevelDetailed: log full details at Info level
+		e.logger.Info("Logs exported",
+			zap.Int("records", logs.LogRecordCount()),
+			zap.Int("bytes", len(data)),
+			zap.String("service_name", serviceName),
+			zap.Int("resource_logs", logs.ResourceLogs().Len()),
+		)
+	}
 }

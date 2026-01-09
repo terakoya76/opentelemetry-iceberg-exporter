@@ -16,6 +16,7 @@ require (
 	go.opentelemetry.io/collector/component/componenttest v0.142.0
 	go.opentelemetry.io/collector/config/configoptional v1.48.0
 	go.opentelemetry.io/collector/config/configretry v1.48.0
+	go.opentelemetry.io/collector/config/configtelemetry v0.142.0
 	go.opentelemetry.io/collector/exporter v1.48.0
 	go.opentelemetry.io/collector/exporter/exporterhelper v0.142.0
 	go.opentelemetry.io/collector/exporter/exportertest v0.142.0

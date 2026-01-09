@@ -8,9 +8,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.uber.org/zap/zaptest"
 
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/iceberg"
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
 func TestDefaultPathConfig(t *testing.T) {
@@ -232,7 +234,7 @@ func TestSanitizePartitionValue(t *testing.T) {
 
 func TestNewIcebergWriter(t *testing.T) {
 	ctx := context.Background()
-	logger := zaptest.NewLogger(t)
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
 
 	t.Run("With filesystem storage and no catalog", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -253,7 +255,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			},
 		}
 
-		writer, err := NewIcebergWriter(ctx, cfg, logger)
+		writer, err := NewIcebergWriter(ctx, cfg, vlogger)
 		require.NoError(t, err)
 		defer func() { _ = writer.Close() }()
 
@@ -278,7 +280,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			Partition: PartitionConfig{},
 		}
 
-		writer, err := NewIcebergWriter(ctx, cfg, logger)
+		writer, err := NewIcebergWriter(ctx, cfg, vlogger)
 		require.NoError(t, err)
 		defer func() { _ = writer.Close() }()
 
@@ -292,7 +294,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			},
 		}
 
-		_, err := NewIcebergWriter(ctx, cfg, logger)
+		_, err := NewIcebergWriter(ctx, cfg, vlogger)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "storage")
 	})
@@ -300,7 +302,7 @@ func TestNewIcebergWriter(t *testing.T) {
 
 func TestIcebergWriter_Write(t *testing.T) {
 	ctx := context.Background()
-	logger := zaptest.NewLogger(t)
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
 	tmpDir := t.TempDir()
 
 	cfg := WriterConfig{
@@ -319,7 +321,7 @@ func TestIcebergWriter_Write(t *testing.T) {
 		},
 	}
 
-	writer, err := NewIcebergWriter(ctx, cfg, logger)
+	writer, err := NewIcebergWriter(ctx, cfg, vlogger)
 	require.NoError(t, err)
 	defer func() { _ = writer.Close() }()
 
@@ -365,7 +367,7 @@ func TestIcebergWriter_Write(t *testing.T) {
 
 func TestIcebergWriter_Close(t *testing.T) {
 	ctx := context.Background()
-	logger := zaptest.NewLogger(t)
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
 	tmpDir := t.TempDir()
 
 	cfg := WriterConfig{
@@ -380,7 +382,7 @@ func TestIcebergWriter_Close(t *testing.T) {
 		},
 	}
 
-	writer, err := NewIcebergWriter(ctx, cfg, logger)
+	writer, err := NewIcebergWriter(ctx, cfg, vlogger)
 	require.NoError(t, err)
 
 	// Close should not error

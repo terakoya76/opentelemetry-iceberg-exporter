@@ -7,6 +7,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configoptional"
 	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
@@ -43,6 +44,7 @@ func createDefaultConfig() component.Config {
 		TimeoutConfig: exporterhelper.NewDefaultTimeoutConfig(),
 		QueueConfig:   configoptional.Default(exporterhelper.NewDefaultQueueConfig()),
 		BackOffConfig: configretry.NewDefaultBackOffConfig(),
+		Verbosity:     configtelemetry.LevelNormal,
 		Storage: iceberg.FileIOConfig{
 			Type: "s3",
 			S3: iceberg.S3FileIOConfig{

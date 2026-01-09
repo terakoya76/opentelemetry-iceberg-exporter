@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/exporter/exportertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
@@ -20,6 +21,7 @@ import (
 func TestConfigValidate(t *testing.T) {
 	t.Run("Valid config with filesystem storage", func(t *testing.T) {
 		cfg := &Config{
+			Verbosity: configtelemetry.LevelNormal,
 			Storage: iceberg.FileIOConfig{
 				Type: "filesystem",
 				Filesystem: iceberg.LocalFileIOConfig{
@@ -36,6 +38,53 @@ func TestConfigValidate(t *testing.T) {
 		}
 		err := cfg.Validate()
 		assert.NoError(t, err)
+	})
+
+	t.Run("All valid verbosity levels", func(t *testing.T) {
+		for _, level := range []configtelemetry.Level{
+			configtelemetry.LevelBasic,
+			configtelemetry.LevelNormal,
+			configtelemetry.LevelDetailed,
+		} {
+			cfg := &Config{
+				Verbosity: level,
+				Storage: iceberg.FileIOConfig{
+					Type: "filesystem",
+					Filesystem: iceberg.LocalFileIOConfig{
+						BasePath: "/tmp/test",
+					},
+				},
+				Catalog: iceberg.CatalogConfig{
+					Type: "none",
+				},
+				Partition: PartitionConfig{
+					Granularity: "hourly",
+				},
+			}
+			err := cfg.Validate()
+			assert.NoError(t, err, "verbosity level %s should be valid", level.String())
+		}
+	})
+
+	t.Run("Invalid verbosity level", func(t *testing.T) {
+		cfg := &Config{
+			Verbosity: configtelemetry.LevelNone, // LevelNone is not supported
+			Storage: iceberg.FileIOConfig{
+				Type: "filesystem",
+				Filesystem: iceberg.LocalFileIOConfig{
+					BasePath: "/tmp/test",
+				},
+			},
+			Catalog: iceberg.CatalogConfig{
+				Type: "none",
+			},
+			Partition: PartitionConfig{
+				Granularity: "hourly",
+			},
+		}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "verbosity")
 	})
 
 	t.Run("Invalid partition granularity", func(t *testing.T) {
@@ -169,6 +218,7 @@ func TestNewFactory(t *testing.T) {
 	assert.Equal(t, "none", icebergCfg.Catalog.Type)
 	assert.Equal(t, "hourly", icebergCfg.Partition.Granularity)
 	assert.Equal(t, "UTC", icebergCfg.Partition.Timezone)
+	assert.Equal(t, configtelemetry.LevelNormal, icebergCfg.Verbosity)
 }
 
 func TestNewIcebergExporter(t *testing.T) {

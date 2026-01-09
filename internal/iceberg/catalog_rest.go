@@ -17,13 +17,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"go.uber.org/zap"
+
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
 // RESTCatalog implements Catalog using the Iceberg REST catalog API via iceberg-go.
 type RESTCatalog struct {
 	catalog   catalog.Catalog
 	warehouse string
-	logger    *zap.Logger
+	logger    *logger.VerboseLogger
 
 	// awsConfig is the AWS configuration for S3 file access.
 	// This is injected into context to bypass iceberg-go's S3 property parsing,
@@ -35,7 +37,7 @@ type RESTCatalog struct {
 }
 
 // NewRESTCatalog creates a new REST catalog using iceberg-go.
-func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileIOConfig, logger *zap.Logger) (*RESTCatalog, error) {
+func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileIOConfig, vlogger *logger.VerboseLogger) (*RESTCatalog, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required for REST catalog initialization")
 	}
@@ -44,31 +46,33 @@ func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileI
 		return nil, fmt.Errorf("rest catalog URI is required (catalog.rest.uri)")
 	}
 
-	logger.Info("connecting to REST catalog",
+	vlogger.Info("connecting to REST catalog",
 		zap.String("uri", cfg.URI),
 		zap.String("warehouse", cfg.Warehouse),
 		zap.Bool("token_configured", cfg.Token != ""))
 
-	awsCfg, err := buildAWSConfigFromStorage(ctx, storageCfg, logger)
+	awsCfg, err := buildAWSConfigFromStorage(ctx, storageCfg, vlogger)
 	if err != nil {
-		logger.Warn("failed to build AWS config from storage config, catalog operations may fail",
+		vlogger.Warn("failed to build AWS config from storage config, catalog operations may fail",
 			zap.Error(err))
 	}
 
 	var opts []rest.Option
 
-	// Add logging transport to debug HTTP requests
-	opts = append(opts, rest.WithCustomTransport(&loggingTransport{
-		wrapped: http.DefaultTransport,
-		logger:  logger,
-	}))
+	// Add logging transport to debug HTTP requests (only when verbosity is Detailed)
+	if vlogger.IsDetailed() {
+		opts = append(opts, rest.WithCustomTransport(&loggingTransport{
+			wrapped: http.DefaultTransport,
+			logger:  vlogger,
+		}))
+	}
 
 	// Bearer token authentication (e.g., Cloudflare API token for R2 Data Catalog)
 	if cfg.Token != "" {
 		opts = append(opts, rest.WithOAuthToken(cfg.Token))
 	} else {
 		// No authentication configured - this may cause "Anonymous" access errors
-		logger.Warn("no authentication configured for REST catalog - table operations will fail with 'Anonymous' error",
+		vlogger.Warn("no authentication configured for REST catalog - table operations will fail with 'Anonymous' error",
 			zap.String("uri", cfg.URI))
 	}
 
@@ -88,7 +92,7 @@ func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileI
 	restCatalog := &RESTCatalog{
 		catalog:   cat,
 		warehouse: cfg.Warehouse,
-		logger:    logger,
+		logger:    vlogger,
 		awsConfig: awsCfg,
 	}
 
@@ -363,7 +367,7 @@ func parseTransform(transform string) iceberg.Transform {
 // This is used to bypass iceberg-go's S3 property parsing which doesn't support
 // properties like s3.signer.uri returned by some REST catalogs.
 // By injecting our own AWS config via context, we bypass ParseAWSConfig() entirely.
-func buildAWSConfigFromStorage(ctx context.Context, storageCfg FileIOConfig, logger *zap.Logger) (*aws.Config, error) {
+func buildAWSConfigFromStorage(ctx context.Context, storageCfg FileIOConfig, vlogger *logger.VerboseLogger) (*aws.Config, error) {
 	var opts []func(*config.LoadOptions) error
 
 	// Determine region and credentials based on storage type
@@ -378,7 +382,7 @@ func buildAWSConfigFromStorage(ctx context.Context, storageCfg FileIOConfig, log
 				credentials.NewStaticCredentialsProvider(s3Cfg.AccessKeyID, s3Cfg.SecretAccessKey, ""),
 			))
 		}
-		logger.Debug("building AWS config from S3 storage config",
+		vlogger.Debug("building AWS config from S3 storage config",
 			zap.String("region", s3Cfg.Region),
 			zap.Bool("has_credentials", s3Cfg.AccessKeyID != ""))
 
@@ -391,13 +395,13 @@ func buildAWSConfigFromStorage(ctx context.Context, storageCfg FileIOConfig, log
 				credentials.NewStaticCredentialsProvider(r2Cfg.AccessKeyID, r2Cfg.SecretAccessKey, ""),
 			))
 		}
-		logger.Debug("building AWS config from R2 storage config",
+		vlogger.Debug("building AWS config from R2 storage config",
 			zap.Bool("has_credentials", r2Cfg.AccessKeyID != ""))
 
 	case "filesystem":
 		// Local filesystem doesn't need AWS config, but we still create a default one
 		// in case catalog operations need it
-		logger.Debug("building default AWS config for filesystem storage")
+		vlogger.Debug("building default AWS config for filesystem storage")
 
 	default:
 		return nil, fmt.Errorf("unsupported storage type for AWS config: %s", storageCfg.Type)

@@ -6,12 +6,14 @@ import (
 	"net/http"
 
 	"go.uber.org/zap"
+
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
 // loggingTransport wraps an http.RoundTripper to log request details
 type loggingTransport struct {
 	wrapped http.RoundTripper
-	logger  *zap.Logger
+	logger  *logger.VerboseLogger
 }
 
 func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {

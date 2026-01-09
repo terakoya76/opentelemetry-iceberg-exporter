@@ -10,6 +10,7 @@ import (
 
 	iarrow "github.com/terakoya76/opentelemetry-iceberg-exporter/internal/arrow"
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/iceberg"
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
 // IcebergWriter orchestrates writing Parquet files to storage and registering them with the Iceberg catalog.
@@ -22,7 +23,7 @@ type IcebergWriter struct {
 	tableNames    iceberg.TableNamesConfig
 	namespace     string
 	granularity   string
-	logger        *zap.Logger
+	logger        *logger.VerboseLogger
 
 	// tablesInitialized tracks which tables have been initialized.
 	tablesInitialized map[string]bool
@@ -50,7 +51,7 @@ type PartitionConfig struct {
 }
 
 // NewIcebergWriter creates a new IcebergWriter.
-func NewIcebergWriter(ctx context.Context, cfg WriterConfig, logger *zap.Logger) (*IcebergWriter, error) {
+func NewIcebergWriter(ctx context.Context, cfg WriterConfig, vlogger *logger.VerboseLogger) (*IcebergWriter, error) {
 	// Validate context - this is critical for REST catalog connections
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required for IcebergWriter initialization")
@@ -65,7 +66,7 @@ func NewIcebergWriter(ctx context.Context, cfg WriterConfig, logger *zap.Logger)
 	// Create catalog (may be NoCatalog if not configured)
 	// Pass storage config to enable AWS config injection for bypassing iceberg-go's
 	// unsupported S3 property parsing (e.g., s3.signer.uri from REST catalogs)
-	cat, err := iceberg.NewCatalog(ctx, cfg.Catalog, cfg.Storage, logger)
+	cat, err := iceberg.NewCatalog(ctx, cfg.Catalog, cfg.Storage, vlogger)
 	if err != nil {
 		// Close FileIO on error (ignore close error since we're already returning an error)
 		_ = fileIO.Close()
@@ -102,7 +103,7 @@ func NewIcebergWriter(ctx context.Context, cfg WriterConfig, logger *zap.Logger)
 		tableNames:        cfg.Catalog.Tables,
 		namespace:         namespace,
 		granularity:       pathConfig.Granularity,
-		logger:            logger,
+		logger:            vlogger,
 		tablesInitialized: make(map[string]bool),
 	}, nil
 }
