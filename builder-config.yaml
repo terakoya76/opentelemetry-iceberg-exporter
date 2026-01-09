@@ -1,7 +1,7 @@
 dist:
   name: opentelemetry-collector-iceberg
   description: OpenTelemetry Collector with Iceberg Exporter
-  version: 0.142.0.2
+  version: 0.142.0.3
   output_path: ./dist
   otelcol_version: 0.142.0
 
@@ -17,5 +17,5 @@ processors:
 
 exporters:
   - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.142.0
-  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.142.0.2
+  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.142.0.3
     name: icebergexporter
