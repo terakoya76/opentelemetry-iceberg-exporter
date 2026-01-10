@@ -375,35 +375,35 @@ All schemas use microsecond precision timestamps for Iceberg v1/v2 compatibility
 | span_id | String | No | Span ID (hex encoded) |
 | trace_state | String | Yes | W3C trace state |
 | parent_span_id | String | Yes | Parent span ID |
-| span_flags | Uint32 | No | Span flags |
+| span_flags | Int32 | No | Span flags |
 | span_name | String | No | Operation name |
 | span_kind | String | No | INTERNAL, SERVER, CLIENT, PRODUCER, CONSUMER |
 | start_time_unix_nano | Timestamp(us) | No | Span start time |
 | end_time_unix_nano | Timestamp(us) | No | Span end time |
 | span_attributes | String | No | JSON-encoded span attributes |
-| dropped_attributes_count | Uint32 | No | Number of dropped attributes |
+| dropped_attributes_count | Int32 | No | Number of dropped attributes |
 | events_time_unix_nano | List[Timestamp] | No | Span event timestamps |
 | events_name | List[String] | No | Span event names |
 | events_attributes | List[String] | No | JSON-encoded event attributes |
-| events_dropped_attributes_count | List[Uint32] | No | Dropped attributes per event |
-| dropped_events_count | Uint32 | No | Number of dropped events |
+| events_dropped_attributes_count | List[Int32] | No | Dropped attributes per event |
+| dropped_events_count | Int32 | No | Number of dropped events |
 | links_trace_id | List[String] | No | Linked trace IDs |
 | links_span_id | List[String] | No | Linked span IDs |
 | links_trace_state | List[String] | No | Linked trace states |
 | links_attributes | List[String] | No | JSON-encoded link attributes |
-| links_dropped_attributes_count | List[Uint32] | No | Dropped attributes per link |
-| links_flags | List[Uint32] | No | Link flags |
-| dropped_links_count | Uint32 | No | Number of dropped links |
+| links_dropped_attributes_count | List[Int32] | No | Dropped attributes per link |
+| links_flags | List[Int32] | No | Link flags |
+| dropped_links_count | Int32 | No | Number of dropped links |
 | status_code | String | Yes | OK, ERROR, UNSET |
 | status_message | String | Yes | Status description |
 | duration | Int64 | No | Duration in nanoseconds (calculated) |
 | service_name | String | Yes | service.name resource attribute |
 | resource_attributes | String | No | JSON-encoded resource attributes |
-| resource_dropped_attributes_count | Uint32 | No | Resource dropped attributes |
+| resource_dropped_attributes_count | Int32 | No | Resource dropped attributes |
 | scope_name | String | Yes | Instrumentation scope name |
 | scope_version | String | Yes | Instrumentation scope version |
 | scope_attributes | String | No | JSON-encoded scope attributes |
-| scope_dropped_attributes_count | Uint32 | No | Scope dropped attributes |
+| scope_dropped_attributes_count | Int32 | No | Scope dropped attributes |
 
 ### Logs Schema
 
@@ -414,19 +414,19 @@ All schemas use microsecond precision timestamps for Iceberg v1/v2 compatibility
 | severity_text | String | Yes | DEBUG, INFO, WARN, ERROR, etc. |
 | body | String | No | Log message (JSON encoded) |
 | log_attributes | String | No | JSON-encoded log attributes |
-| dropped_attributes_count | Uint32 | No | Number of dropped attributes |
-| log_flags | Uint32 | No | Log record flags |
+| dropped_attributes_count | Int32 | No | Number of dropped attributes |
+| log_flags | Int32 | No | Log record flags |
 | trace_id | String | Yes | Associated trace ID |
 | span_id | String | Yes | Associated span ID |
 | observed_time_unix_nano | Timestamp(us) | Yes | When the log was observed |
 | event_name | String | Yes | Log event name |
 | service_name | String | Yes | service.name resource attribute |
 | resource_attributes | String | No | JSON-encoded resource attributes |
-| resource_dropped_attributes_count | Uint32 | No | Resource dropped attributes |
+| resource_dropped_attributes_count | Int32 | No | Resource dropped attributes |
 | scope_name | String | Yes | Instrumentation scope name |
 | scope_version | String | Yes | Instrumentation scope version |
 | scope_attributes | String | No | JSON-encoded scope attributes |
-| scope_dropped_attributes_count | Uint32 | No | Scope dropped attributes |
+| scope_dropped_attributes_count | Int32 | No | Scope dropped attributes |
 
 ### Metrics Schemas
 
@@ -439,18 +439,18 @@ Metrics are stored in separate tables by type, each with an optimized schema.
 | time_unix_nano | Timestamp(us) | No | Data point timestamp |
 | service_name | String | Yes | service.name resource attribute |
 | resource_attributes | String | No | JSON-encoded resource attributes |
-| resource_dropped_attributes_count | Uint32 | No | Resource dropped attributes |
+| resource_dropped_attributes_count | Int32 | No | Resource dropped attributes |
 | scope_name | String | Yes | Instrumentation scope name |
 | scope_version | String | Yes | Instrumentation scope version |
 | scope_attributes | String | No | JSON-encoded scope attributes |
-| scope_dropped_attributes_count | Uint32 | No | Scope dropped attributes |
+| scope_dropped_attributes_count | Int32 | No | Scope dropped attributes |
 | metric_name | String | No | Metric name |
 | metric_description | String | Yes | Metric description |
 | metric_unit | String | Yes | Unit (e.g., "ms", "bytes") |
 | metric_metadata | String | Yes | JSON-encoded metric metadata |
 | attributes | String | No | JSON-encoded data point attributes |
 | start_time_unix_nano | Timestamp(us) | Yes | Start time for cumulative metrics |
-| flags | Uint32 | No | Data point flags |
+| flags | Int32 | No | Data point flags |
 
 #### Gauge Schema (`otel_metrics_gauge`)
 
@@ -485,11 +485,11 @@ Common fields plus:
 
 | Field | Type | Nullable | Description |
 |-------|------|----------|-------------|
-| count | Uint64 | No | Number of values |
+| count | Int64 | No | Number of values |
 | sum | Float64 | Yes | Sum of values |
 | min | Float64 | Yes | Minimum value |
 | max | Float64 | Yes | Maximum value |
-| bucket_counts | List[Uint64] | No | Bucket counts |
+| bucket_counts | List[Int64] | No | Bucket counts |
 | explicit_bounds | List[Float64] | No | Bucket boundaries |
 | aggregation_temporality | String | No | CUMULATIVE or DELTA |
 | exemplars_* | ... | Yes | Same as Gauge |
@@ -500,17 +500,17 @@ Common fields plus:
 
 | Field | Type | Nullable | Description |
 |-------|------|----------|-------------|
-| count | Uint64 | No | Number of values |
+| count | Int64 | No | Number of values |
 | sum | Float64 | Yes | Sum of values |
 | min | Float64 | Yes | Minimum value |
 | max | Float64 | Yes | Maximum value |
 | scale | Int32 | No | Scale factor |
-| zero_count | Uint64 | No | Count of zero values |
+| zero_count | Int64 | No | Count of zero values |
 | zero_threshold | Float64 | No | Zero bucket threshold |
 | positive_offset | Int32 | No | Positive buckets offset |
-| positive_buckets | List[Uint64] | No | Positive bucket counts |
+| positive_buckets | List[Int64] | No | Positive bucket counts |
 | negative_offset | Int32 | No | Negative buckets offset |
-| negative_buckets | List[Uint64] | No | Negative bucket counts |
+| negative_buckets | List[Int64] | No | Negative bucket counts |
 | aggregation_temporality | String | No | CUMULATIVE or DELTA |
 | exemplars_* | ... | Yes | Same as Gauge |
 
@@ -520,7 +520,7 @@ Common fields plus:
 
 | Field | Type | Nullable | Description |
 |-------|------|----------|-------------|
-| count | Uint64 | No | Number of values |
+| count | Int64 | No | Number of values |
 | sum | Float64 | No | Sum of values |
 | quantile_values.quantile | List[Float64] | No | Quantile values (e.g., 0.5, 0.99) |
 | quantile_values.value | List[Float64] | No | Values at each quantile |
