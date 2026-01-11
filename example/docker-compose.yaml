@@ -18,6 +18,7 @@ services:
     command: --config /app/config.yaml
     volumes:
       - ./otel-config.yaml:/app/config.yaml
+      - iceberg-queue:/var/lib/otelcol/iceberg-queue
     networks:
       - demo-network
     depends_on:
@@ -157,3 +158,4 @@ networks:
 
 volumes:
   minio-data:
+  iceberg-queue:

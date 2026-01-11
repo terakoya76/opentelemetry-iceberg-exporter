@@ -1,12 +1,13 @@
 dist:
   name: opentelemetry-collector-iceberg
   description: OpenTelemetry Collector with Iceberg Exporter
-  version: 0.142.0.3
+  version: 0.142.0.4
   output_path: ./dist
   otelcol_version: 0.142.0
 
 extensions:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.142.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v0.142.0
 
 receivers:
   - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.142.0
@@ -17,5 +18,5 @@ processors:
 
 exporters:
   - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.142.0
-  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.142.0.3
+  - gomod: github.com/terakoya76/opentelemetry-iceberg-exporter v0.142.0.4
     name: icebergexporter

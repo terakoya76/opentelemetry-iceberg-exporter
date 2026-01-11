@@ -4,6 +4,16 @@ extensions:
   health_check:
     endpoint: 0.0.0.0:13133
 
+  # File storage for persistent queue (survives collector restarts)
+  file_storage/iceberg:
+    directory: /var/lib/otelcol/iceberg-queue
+    create_directory: true
+    timeout: 10s
+    compaction:
+      on_start: true
+      on_rebound: true
+      rebound_trigger_threshold_mib: 10
+
 receivers:
   otlp:
     protocols:
@@ -72,12 +82,14 @@ exporters:
     sending_queue:
       enabled: true
       num_consumers: 10
+      # Persistent queue using file_storage extension (survives restarts)
+      storage: file_storage/iceberg
     retry_on_failure:
       enabled: true
       max_elapsed_time: 300s
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, file_storage/iceberg]
   pipelines:
     traces:
       receivers: [otlp]

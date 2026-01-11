@@ -534,9 +534,9 @@ cat <GHCR_PAT> | docker login ghcr.io -u terakoya76 --password-stdin
 
 make docker-build
 make docker-tag
-make docker-tag DOCKER_TAG=v0.142.0.3
+make docker-tag DOCKER_TAG=v0.142.0.4
 make docker-push
-make docker-push DOCKER_TAG=v0.142.0.3
+make docker-push DOCKER_TAG=v0.142.0.4
 ```
 
 ## License
