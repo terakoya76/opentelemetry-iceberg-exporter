@@ -133,18 +133,38 @@ type WriteOptions struct {
 // This method follows the "best-effort" pattern:
 // 1. Data is ALWAYS written to storage first (ensures data durability)
 // 2. Catalog registration is attempted afterward (failures are logged, not propagated)
+//
+// Error Logging for Recovery:
+// - Upload failures: Log with "parquet upload failed" - data needs to be re-exported
+// - Catalog failures: Log with "catalog registration failed" - file exists, needs manual registration
 func (w *IcebergWriter) Write(ctx context.Context, opts WriteOptions) error {
 	tableName := w.tableNames.GetTableName(opts.SignalType)
 
-	// Step 1: Generate Iceberg-compatible path
-	path := w.pathGenerator.GeneratePath(PathOptions{
+	// Step 1: Generate Iceberg-compatible path and compute recovery info upfront
+	pathOpts := PathOptions{
 		TableName:   tableName,
 		Timestamp:   opts.Timestamp,
 		ServiceName: opts.ServiceName,
-	})
+	}
+	path := w.pathGenerator.GeneratePath(pathOpts)
+	fileURI := w.fileIO.GetURI(path)
+	partitionValues := w.pathGenerator.ExtractPartitionValues(pathOpts)
 
 	// Step 2: ALWAYS write to storage first (data durability is the priority)
 	if err := w.fileIO.Write(ctx, path, opts.Data, iceberg.DefaultWriteOptions()); err != nil {
+		// Log error with full context for recovery (data needs to be re-exported from source)
+		w.logger.Error("parquet upload failed",
+			zap.String("failure_type", "upload"),
+			zap.String("signal_type", opts.SignalType),
+			zap.String("namespace", w.namespace),
+			zap.String("table", tableName),
+			zap.String("target_path", path),
+			zap.String("target_uri", fileURI),
+			zap.Time("timestamp", opts.Timestamp),
+			zap.String("service_name", opts.ServiceName),
+			zap.Int64("record_count", opts.RecordCount),
+			zap.Int("data_size_bytes", len(opts.Data)),
+			zap.Error(err))
 		return fmt.Errorf("failed to write to storage: %w", err)
 	}
 
@@ -156,16 +176,34 @@ func (w *IcebergWriter) Write(ctx context.Context, opts WriteOptions) error {
 	// Step 3: Ensure table exists (best-effort, only if catalog is enabled)
 	if w.catalog.GetCatalogType() != "none" {
 		if err := w.ensureTableExists(ctx, tableName, opts); err != nil {
-			w.logger.Warn("failed to ensure table exists (data is safely stored)",
+			// Log error with recovery info - file is stored, but table creation failed
+			w.logger.Error("table creation failed (data is safely stored)",
+				zap.String("failure_type", "table_creation"),
+				zap.String("signal_type", opts.SignalType),
+				zap.String("namespace", w.namespace),
 				zap.String("table", tableName),
+				zap.String("file_uri", fileURI),
+				zap.String("file_path", path),
+				zap.Int64("file_size_bytes", int64(len(opts.Data))),
+				zap.Int64("record_count", opts.RecordCount),
+				zap.Any("partition_values", partitionValues),
 				zap.Error(err))
 			// Don't return error - data is already safely stored
 		} else {
 			// Step 4: Register file with catalog (best-effort)
 			if err := w.registerWithCatalog(ctx, tableName, path, opts); err != nil {
-				w.logger.Warn("catalog registration failed (data is safely stored)",
-					zap.String("path", path),
+				// Log error with full recovery info for manual re-registration
+				w.logger.Error("catalog registration failed (data is safely stored)",
+					zap.String("failure_type", "catalog_registration"),
+					zap.String("signal_type", opts.SignalType),
+					zap.String("namespace", w.namespace),
 					zap.String("table", tableName),
+					zap.String("file_uri", fileURI),
+					zap.String("file_path", path),
+					zap.Int64("file_size_bytes", int64(len(opts.Data))),
+					zap.Int64("record_count", opts.RecordCount),
+					zap.Any("partition_values", partitionValues),
+					zap.String("recovery_hint", "Use PyIceberg table.add_files([file_uri]) or Spark CALL catalog.system.add_files()"),
 					zap.Error(err))
 				// Don't return error - data is already safely stored
 			} else {
