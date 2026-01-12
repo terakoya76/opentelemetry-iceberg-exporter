@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -23,26 +21,24 @@ type R2FileIO struct {
 func NewR2FileIO(ctx context.Context, cfg R2FileIOConfig) (*R2FileIO, error) {
 	// R2 requires static credentials
 	if cfg.AccessKeyID == "" || cfg.SecretAccessKey == "" {
-		return nil, fmt.Errorf("r2 requires access_key_id and secret_access_key")
+		return nil, fmt.Errorf("R2 requires access_key_id and secret_access_key")
 	}
 
 	// Build R2 endpoint URL
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 
-	// Load AWS config with R2-specific settings
-	awsCfg, err := config.LoadDefaultConfig(ctx,
-		config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
-		),
-		// R2 doesn't use regions, but AWS SDK requires one
-		config.WithRegion("auto"),
-	)
+	// Build AWS config with R2-specific settings (auto region)
+	awsCfg, err := BuildAWSConfig(ctx, AWSCredentials{
+		AccessKeyID:     cfg.AccessKeyID,
+		SecretAccessKey: cfg.SecretAccessKey,
+		Region:          "auto", // R2 uses "auto" region
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config for R2: %w", err)
+		return nil, err
 	}
 
 	// Create S3 client with R2-specific options
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+	client := s3.NewFromConfig(*awsCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 		// R2 requires path-style addressing
 		o.UsePathStyle = true

@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -19,23 +17,13 @@ type S3FileIO struct {
 
 // NewS3FileIO creates a new S3FileIO.
 func NewS3FileIO(ctx context.Context, cfg S3FileIOConfig) (*S3FileIO, error) {
-	var opts []func(*config.LoadOptions) error
-
-	// Set region if provided
-	if cfg.Region != "" {
-		opts = append(opts, config.WithRegion(cfg.Region))
-	}
-
-	// Set credentials if provided
-	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
-		opts = append(opts, config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
-		))
-	}
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, opts...)
+	awsCfg, err := BuildAWSConfig(ctx, AWSCredentials{
+		AccessKeyID:     cfg.AccessKeyID,
+		SecretAccessKey: cfg.SecretAccessKey,
+		Region:          cfg.Region,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, err
 	}
 
 	// Create S3 client with custom options
@@ -56,7 +44,7 @@ func NewS3FileIO(ctx context.Context, cfg S3FileIOConfig) (*S3FileIO, error) {
 		})
 	}
 
-	client := s3.NewFromConfig(awsCfg, s3Opts...)
+	client := s3.NewFromConfig(*awsCfg, s3Opts...)
 
 	return &S3FileIO{
 		client: client,

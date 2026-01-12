@@ -14,8 +14,6 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"go.uber.org/zap"
 
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
@@ -368,51 +366,21 @@ func parseTransform(transform string) iceberg.Transform {
 // properties like s3.signer.uri returned by some REST catalogs.
 // By injecting our own AWS config via context, we bypass ParseAWSConfig() entirely.
 func buildAWSConfigFromStorage(ctx context.Context, storageCfg FileIOConfig, vlogger *logger.VerboseLogger) (*aws.Config, error) {
-	var opts []func(*config.LoadOptions) error
-
-	// Determine region and credentials based on storage type
+	// Log the storage type being used
 	switch storageCfg.Type {
 	case "s3", "":
-		s3Cfg := storageCfg.S3
-		if s3Cfg.Region != "" {
-			opts = append(opts, config.WithRegion(s3Cfg.Region))
-		}
-		if s3Cfg.AccessKeyID != "" && s3Cfg.SecretAccessKey != "" {
-			opts = append(opts, config.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider(s3Cfg.AccessKeyID, s3Cfg.SecretAccessKey, ""),
-			))
-		}
 		vlogger.Debug("building AWS config from S3 storage config",
-			zap.String("region", s3Cfg.Region),
-			zap.Bool("has_credentials", s3Cfg.AccessKeyID != ""))
-
+			zap.String("region", storageCfg.S3.Region),
+			zap.Bool("has_credentials", storageCfg.S3.AccessKeyID != ""))
 	case "r2":
-		r2Cfg := storageCfg.R2
-		// R2 uses S3-compatible API with auto region
-		opts = append(opts, config.WithRegion("auto"))
-		if r2Cfg.AccessKeyID != "" && r2Cfg.SecretAccessKey != "" {
-			opts = append(opts, config.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider(r2Cfg.AccessKeyID, r2Cfg.SecretAccessKey, ""),
-			))
-		}
 		vlogger.Debug("building AWS config from R2 storage config",
-			zap.Bool("has_credentials", r2Cfg.AccessKeyID != ""))
-
+			zap.Bool("has_credentials", storageCfg.R2.AccessKeyID != ""))
 	case "filesystem":
-		// Local filesystem doesn't need AWS config, but we still create a default one
-		// in case catalog operations need it
 		vlogger.Debug("building default AWS config for filesystem storage")
-
-	default:
-		return nil, fmt.Errorf("unsupported storage type for AWS config: %s", storageCfg.Type)
 	}
 
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	return &cfg, nil
+	// Delegate to the centralized auth utility
+	return BuildAWSConfigFromStorageConfig(ctx, storageCfg)
 }
 
 // normalizeIcebergError builds a descriptive error message by extracting a meaningful
