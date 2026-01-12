@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	oarrow "github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -328,7 +328,7 @@ func TestMetricRecords_ForEach(t *testing.T) {
 
 	// Track which types were iterated
 	visited := make(map[MetricType]bool)
-	records.ForEach(func(mt MetricType, _ oarrow.RecordBatch) {
+	records.ForEach(func(mt MetricType, _ arrow.RecordBatch) {
 		visited[mt] = true
 	})
 
