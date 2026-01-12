@@ -23,6 +23,11 @@ type Catalog interface {
 	// This should be called after the file has been written to storage.
 	AppendDataFile(ctx context.Context, opts AppendOptions) error
 
+	// ListDataFiles returns a list of data file paths registered with the table.
+	// Returns the full URIs of all data files in the current snapshot's manifests.
+	// If the table doesn't exist or has no snapshots, returns an empty list.
+	ListDataFiles(ctx context.Context, namespace, table string) ([]string, error)
+
 	// Close releases any resources held by the catalog.
 	Close() error
 
@@ -48,53 +53,7 @@ type AppendOptions struct {
 	RecordCount int64
 
 	// PartitionValues are the partition column values for this file (Hive-style).
-	// Key is the partition column name, value is the partition value.
-	PartitionValues map[string]string
-}
-
-// PartitionSpec defines the partition specification for a table.
-type PartitionSpec struct {
-	// Fields are the partition fields.
-	Fields []PartitionField
-}
-
-// PartitionField defines a single partition field.
-type PartitionField struct {
-	// Name is the partition column name.
-	Name string
-
-	// Transform is the partition transform (identity, year, month, day, hour, etc.).
-	Transform string
-
-	// SourceColumn is the source column name for time-based transforms.
-	SourceColumn string
-}
-
-// OTELPartitionSpec returns a partition spec for OTEL data based on granularity.
-func OTELPartitionSpec(timestampColumn, granularity string) PartitionSpec {
-	// Map granularity config to transform and partition name
-	var transform, name string
-	switch granularity {
-	case "monthly":
-		transform = "month"
-		name = "month"
-	case "daily":
-		transform = "day"
-		name = "day"
-	case "hourly", "":
-		transform = "hour"
-		name = "hour"
-	default:
-		// Default to hourly for unknown values
-		transform = "hour"
-		name = "hour"
-	}
-
-	return PartitionSpec{
-		Fields: []PartitionField{
-			{Name: name, Transform: transform, SourceColumn: timestampColumn},
-		},
-	}
+	PartitionValues PartitionValues
 }
 
 // CatalogConfig holds the catalog configuration.

@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/constants"
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/iceberg"
 )
 
 // PathConfig holds configuration for path generation.
@@ -50,10 +53,10 @@ func NewPathGenerator(config PathConfig) (*PathGenerator, error) {
 }
 
 // GeneratePath generates an Iceberg-compatible file path.
-// Path format: {exporterName}/{table}/data/{partition_path}/{filename}.parquet
+// Path format: {ExporterName}/{table}/data/{partition_path}/{filename}.parquet
 func (g *PathGenerator) GeneratePath(opts PathOptions) string {
-	// Base path: {exporterName}/{table}/data
-	basePath := fmt.Sprintf("%s/%s/data", exporterName, opts.TableName)
+	// Base path: {ExporterName}/{table}/data
+	basePath := fmt.Sprintf("%s/%s/data", constants.ExporterName, opts.TableName)
 
 	// Partition path
 	partitionPath := g.generatePartitionPath(opts)
@@ -117,26 +120,22 @@ func (g *PathGenerator) generatePartitionPath(opts PathOptions) string {
 }
 
 // ExtractPartitionValues extracts partition values for Iceberg catalog registration.
-func (g *PathGenerator) ExtractPartitionValues(opts PathOptions) map[string]string {
+func (g *PathGenerator) ExtractPartitionValues(opts PathOptions) iceberg.PartitionValues {
 	ts := opts.Timestamp.In(g.loc)
 
-	values := make(map[string]string)
-
-	// Add service name if configured and present
-	if g.config.IncludeServiceName && opts.ServiceName != "" {
-		values["service_name"] = sanitizePartitionValue(opts.ServiceName)
+	values := iceberg.PartitionValues{
+		Year:  fmt.Sprintf("%d", ts.Year()),
+		Month: fmt.Sprintf("%02d", ts.Month()),
 	}
 
-	// Add time-based partition values
-	values["year"] = fmt.Sprintf("%d", ts.Year())
-	values["month"] = fmt.Sprintf("%02d", ts.Month())
-
+	// Add day partition value for daily or hourly granularity
 	if g.config.Granularity == "daily" || g.config.Granularity == "hourly" {
-		values["day"] = fmt.Sprintf("%02d", ts.Day())
+		values.Day = fmt.Sprintf("%02d", ts.Day())
 	}
 
+	// Add hour partition value for hourly granularity
 	if g.config.Granularity == "hourly" {
-		values["hour"] = fmt.Sprintf("%02d", ts.Hour())
+		values.Hour = fmt.Sprintf("%02d", ts.Hour())
 	}
 
 	return values

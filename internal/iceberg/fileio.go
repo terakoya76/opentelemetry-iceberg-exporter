@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // FileIO abstracts the storage backend for writing Parquet files.
@@ -16,6 +17,15 @@ type FileIO interface {
 	// Write writes data to the specified path.
 	// The path should be relative to the configured base location.
 	Write(ctx context.Context, path string, data []byte, opts WriteOptions) error
+
+	// List lists all files under the specified prefix.
+	// The prefix should be relative to the configured base location.
+	// Returns FileInfo for each file found.
+	List(ctx context.Context, prefix string) ([]FileInfo, error)
+
+	// Read reads a file from the specified path.
+	// The path should be relative to the configured base location.
+	Read(ctx context.Context, path string) ([]byte, error)
 
 	// Close releases any resources held by the FileIO.
 	Close() error
@@ -28,6 +38,18 @@ type FileIO interface {
 
 	// GetFileIOType returns the FileIO type identifier.
 	GetFileIOType() string
+}
+
+// FileInfo contains metadata about a file in storage.
+type FileInfo struct {
+	// Path is the relative path to the file (relative to base location).
+	Path string
+
+	// Size is the file size in bytes.
+	Size int64
+
+	// LastModified is the time the file was last modified.
+	LastModified time.Time
 }
 
 // WriteOptions contains options for a single write operation.

@@ -30,6 +30,12 @@ func (c *NoCatalog) AppendDataFile(_ context.Context, _ AppendOptions) error {
 	return nil
 }
 
+// ListDataFiles implements Catalog.ListDataFiles (no-op).
+// Returns empty list since NoCatalog doesn't track files.
+func (c *NoCatalog) ListDataFiles(_ context.Context, _, _ string) ([]string, error) {
+	return []string{}, nil
+}
+
 // Close implements Catalog.Close (no-op).
 func (c *NoCatalog) Close() error {
 	return nil

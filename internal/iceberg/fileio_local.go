@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // LocalFileIO implements FileIO for local filesystem storage.
@@ -47,6 +48,67 @@ func (f *LocalFileIO) Write(_ context.Context, filePath string, data []byte, _ W
 	}
 
 	return nil
+}
+
+// List implements FileIO.List.
+// Lists all files under the specified prefix in the local filesystem.
+func (f *LocalFileIO) List(_ context.Context, prefix string) ([]FileInfo, error) {
+	var files []FileInfo
+
+	searchPath := filepath.Join(f.basePath, prefix)
+
+	// Check if the path exists
+	if _, err := os.Stat(searchPath); os.IsNotExist(err) {
+		// Return empty list if path doesn't exist
+		return files, nil
+	}
+
+	err := filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		// Get relative path from base
+		relPath, err := filepath.Rel(f.basePath, path)
+		if err != nil {
+			return err
+		}
+
+		// Convert to forward slashes for consistency
+		relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
+
+		files = append(files, FileInfo{
+			Path:         relPath,
+			Size:         info.Size(),
+			LastModified: info.ModTime(),
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list local files: %w", err)
+	}
+
+	return files, nil
+}
+
+// Read implements FileIO.Read.
+// Reads the entire contents of a file from the local filesystem.
+func (f *LocalFileIO) Read(_ context.Context, filePath string) ([]byte, error) {
+	fullPath := filepath.Join(f.basePath, filePath)
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read local file: %w", err)
+	}
+
+	return data, nil
 }
 
 // Close implements FileIO.Close.

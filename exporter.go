@@ -18,8 +18,6 @@ import (
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
-const exporterName = "opentelemetry-iceberg-exporter"
-
 // icebergExporter exports telemetry data to Parquet files with Iceberg catalog support.
 type icebergExporter struct {
 	config *Config

@@ -148,10 +148,10 @@ func TestPathGenerator_ExtractPartitionValues(t *testing.T) {
 			Timestamp: ts,
 		})
 
-		assert.Equal(t, "2024", values["year"])
-		assert.Equal(t, "06", values["month"])
-		assert.Equal(t, "15", values["day"])
-		assert.Equal(t, "14", values["hour"])
+		assert.Equal(t, "2024", values.Year)
+		assert.Equal(t, "06", values.Month)
+		assert.Equal(t, "15", values.Day)
+		assert.Equal(t, "14", values.Hour)
 	})
 
 	t.Run("Daily granularity", func(t *testing.T) {
@@ -164,11 +164,10 @@ func TestPathGenerator_ExtractPartitionValues(t *testing.T) {
 			Timestamp: ts,
 		})
 
-		assert.Equal(t, "2024", values["year"])
-		assert.Equal(t, "06", values["month"])
-		assert.Equal(t, "15", values["day"])
-		_, hasHour := values["hour"]
-		assert.False(t, hasHour)
+		assert.Equal(t, "2024", values.Year)
+		assert.Equal(t, "06", values.Month)
+		assert.Equal(t, "15", values.Day)
+		assert.Empty(t, values.Hour)
 	})
 
 	t.Run("Monthly granularity", func(t *testing.T) {
@@ -181,31 +180,12 @@ func TestPathGenerator_ExtractPartitionValues(t *testing.T) {
 			Timestamp: ts,
 		})
 
-		assert.Equal(t, "2024", values["year"])
-		assert.Equal(t, "06", values["month"])
-		_, hasDay := values["day"]
-		assert.False(t, hasDay)
-		_, hasHour := values["hour"]
-		assert.False(t, hasHour)
+		assert.Equal(t, "2024", values.Year)
+		assert.Equal(t, "06", values.Month)
+		assert.Empty(t, values.Day)
+		assert.Empty(t, values.Hour)
 	})
 
-	t.Run("With service name", func(t *testing.T) {
-		cfg := PathConfig{
-			Granularity:        "hourly",
-			Timezone:           "UTC",
-			IncludeServiceName: true,
-		}
-		gen, err := NewPathGenerator(cfg)
-		require.NoError(t, err)
-
-		values := gen.ExtractPartitionValues(PathOptions{
-			TableName:   "otel_traces",
-			Timestamp:   ts,
-			ServiceName: "my-service",
-		})
-
-		assert.Equal(t, "my-service", values["service_name"])
-	})
 }
 
 func TestSanitizePartitionValue(t *testing.T) {

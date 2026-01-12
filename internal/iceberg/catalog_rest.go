@@ -84,7 +84,12 @@ func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileI
 
 	cat, err := rest.NewCatalog(ctx, "rest", cfg.URI, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize rest catalog: %w", err)
+		errMsg := normalizeIcebergError(err)
+
+		if cfg.Token == "" {
+			errMsg += " (no authentication configured - try providing --catalog-token)"
+		}
+		return nil, fmt.Errorf("failed to initialize rest catalog: %s", errMsg)
 	}
 
 	restCatalog := &RESTCatalog{
@@ -235,7 +240,7 @@ func (c *RESTCatalog) EnsureTable(ctx context.Context, namespace, tableName stri
 }
 
 // AppendDataFile implements Catalog.AppendDataFile.
-// This method registers a data file with the Iceberg table using iceberg-go's transaction API.
+// Registers a data file with the Iceberg table using iceberg-go's transaction API.
 func (c *RESTCatalog) AppendDataFile(ctx context.Context, opts AppendOptions) error {
 	c.logger.Debug("appending data file to table",
 		zap.String("namespace", opts.Namespace),
@@ -244,46 +249,117 @@ func (c *RESTCatalog) AppendDataFile(ctx context.Context, opts AppendOptions) er
 		zap.Int64("records", opts.RecordCount),
 		zap.Int64("size", opts.FileSizeBytes))
 
-	// Inject AWS config into context to bypass iceberg-go's S3 property parsing.
-	// This allows us to work around the unsupported s3.signer.uri property.
 	if c.awsConfig != nil {
 		ctx = utils.WithAwsConfig(ctx, c.awsConfig)
 	}
 
-	// Load the table from the catalog
 	tableIdent := catalog.ToIdentifier(opts.Namespace, opts.Table)
-	tbl, err := c.catalog.LoadTable(ctx, tableIdent)
+	table, err := c.catalog.LoadTable(ctx, tableIdent)
 	if err != nil {
 		return fmt.Errorf("failed to load table %s.%s: %w", opts.Namespace, opts.Table, err)
 	}
 
-	// Create a new transaction
-	tx := tbl.NewTransaction()
-
-	// Add the data file to the transaction
-	// Use ignoreDuplicates=true to handle potential retries gracefully
+	tx := table.NewTransaction()
 	snapshotProps := iceberg.Properties{
 		"otel.exporter":     "iceberg",
 		"otel.record_count": fmt.Sprintf("%d", opts.RecordCount),
 		"otel.file_size":    fmt.Sprintf("%d", opts.FileSizeBytes),
 	}
-	if err := tx.AddFiles(ctx, []string{opts.FilePath}, snapshotProps, true); err != nil {
+
+	if err := tx.AddFiles(ctx, []string{opts.FilePath}, snapshotProps, false); err != nil {
 		return fmt.Errorf("failed to add file %s to table %s.%s: %w", opts.FilePath, opts.Namespace, opts.Table, err)
 	}
 
-	// Commit the transaction
 	if _, err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction for table %s.%s: %w", opts.Namespace, opts.Table, err)
 	}
 
-	c.logger.Info("successfully registered data file with catalog",
+	c.logger.Info("successfully registered data file",
 		zap.String("namespace", opts.Namespace),
 		zap.String("table", opts.Table),
-		zap.String("file", opts.FilePath),
-		zap.Int64("records", opts.RecordCount),
-		zap.Int64("size", opts.FileSizeBytes))
+		zap.String("file", opts.FilePath))
 
 	return nil
+}
+
+// ListDataFiles implements Catalog.ListDataFiles.
+// Returns the list of data file paths registered with the table by reading the manifest.
+func (c *RESTCatalog) ListDataFiles(ctx context.Context, namespace, tableName string) ([]string, error) {
+	c.logger.Debug("listing data files from manifest",
+		zap.String("namespace", namespace),
+		zap.String("table", tableName))
+
+	if c.awsConfig != nil {
+		ctx = utils.WithAwsConfig(ctx, c.awsConfig)
+	}
+
+	// Load the table from the catalog
+	tableIdent := catalog.ToIdentifier(namespace, tableName)
+	table, err := c.catalog.LoadTable(ctx, tableIdent)
+	if err != nil {
+		// If the table doesn't exist, return empty list
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "not found") || strings.Contains(errStr, "does not exist") {
+			c.logger.Debug("table does not exist, returning empty file list",
+				zap.String("namespace", namespace),
+				zap.String("table", tableName))
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("failed to load table %s.%s: %w", namespace, tableName, err)
+	}
+
+	// Get the current snapshot
+	snapshot := table.CurrentSnapshot()
+	if snapshot == nil {
+		c.logger.Debug("table has no snapshots, returning empty file list",
+			zap.String("namespace", namespace),
+			zap.String("table", tableName))
+		return []string{}, nil
+	}
+
+	// Get the file IO from the table for reading manifests
+	fileIO, err := table.FS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file IO for table %s.%s: %w", namespace, tableName, err)
+	}
+
+	// Get manifests from the snapshot
+	manifests, err := snapshot.Manifests(fileIO)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read manifests for table %s.%s: %w", namespace, tableName, err)
+	}
+
+	// Collect all data file paths from manifests
+	var filePaths []string
+	for _, manifest := range manifests {
+		// Skip delete manifests, we only want data files
+		if manifest.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+
+		// Fetch manifest entries (skip deleted entries)
+		entries, err := manifest.FetchEntries(fileIO, true)
+		if err != nil {
+			c.logger.Warn("failed to read manifest entries, skipping manifest",
+				zap.String("manifest", manifest.FilePath()),
+				zap.Error(err))
+			continue
+		}
+
+		for _, entry := range entries {
+			// Only include active data files (not deleted)
+			if entry.Status() != iceberg.EntryStatusDELETED {
+				filePaths = append(filePaths, entry.DataFile().FilePath())
+			}
+		}
+	}
+
+	c.logger.Info("listed data files from manifest",
+		zap.String("namespace", namespace),
+		zap.String("table", tableName),
+		zap.Int("file_count", len(filePaths)))
+
+	return filePaths, nil
 }
 
 // Close implements Catalog.Close.

@@ -1,5 +1,6 @@
 # Binary
 opentelemetry-collector
+iceberg-recovery
 main
 
 # Generated collector code

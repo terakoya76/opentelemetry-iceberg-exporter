@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -79,6 +81,71 @@ func (f *S3FileIO) Write(ctx context.Context, filePath string, data []byte, opts
 	}
 
 	return nil
+}
+
+// List implements FileIO.List.
+// Lists all objects under the specified prefix in the S3 bucket.
+func (f *S3FileIO) List(ctx context.Context, prefix string) ([]FileInfo, error) {
+	var files []FileInfo
+
+	paginator := s3.NewListObjectsV2Paginator(f.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(f.bucket),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list S3 objects: %w", err)
+		}
+
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+
+			// Skip "directory" entries (keys ending with /)
+			if strings.HasSuffix(*obj.Key, "/") {
+				continue
+			}
+
+			fi := FileInfo{
+				Path: *obj.Key,
+			}
+			if obj.Size != nil {
+				fi.Size = *obj.Size
+			}
+			if obj.LastModified != nil {
+				fi.LastModified = *obj.LastModified
+			}
+
+			files = append(files, fi)
+		}
+	}
+
+	return files, nil
+}
+
+// Read implements FileIO.Read.
+// Reads the entire contents of a file from S3.
+func (f *S3FileIO) Read(ctx context.Context, filePath string) ([]byte, error) {
+	key := f.buildKey(filePath)
+
+	output, err := f.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(f.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get S3 object: %w", err)
+	}
+	defer func() { _ = output.Body.Close() }()
+
+	data, err := io.ReadAll(output.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read S3 object body: %w", err)
+	}
+
+	return data, nil
 }
 
 // Close implements FileIO.Close.
