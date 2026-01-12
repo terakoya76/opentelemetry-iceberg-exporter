@@ -49,19 +49,22 @@ graph LR
 │   │   ├── schema.go       # Arrow schema definitions
 │   │   ├── parquet.go      # Parquet writer utilities
 │   │   └── attributes.go   # Attribute conversion helpers
-│   └── iceberg/            # Iceberg abstractions
-│       ├── catalog.go      # Catalog interface & config
-│       ├── catalog_rest.go # REST Catalog implementation
-│       ├── catalog_noop.go # No-op Catalog (Parquet-only mode)
-│       ├── catalog_factory.go # Catalog factory
-│       ├── fileio.go       # FileIO interface & config
-│       ├── fileio_s3.go    # S3 FileIO implementation
-│       ├── fileio_r2.go    # R2 FileIO implementation
-│       ├── fileio_local.go # Local filesystem implementation
-│       └── fileio_factory.go # FileIO factory
+│   ├── iceberg/            # Iceberg abstractions
+│   │   ├── catalog.go      # Catalog interface & config
+│   │   ├── catalog_rest.go # REST Catalog implementation
+│   │   ├── catalog_noop.go # No-op Catalog (Parquet-only mode)
+│   │   ├── catalog_factory.go # Catalog factory
+│   │   ├── fileio.go       # FileIO interface & config
+│   │   ├── fileio_s3.go    # S3 FileIO implementation
+│   │   ├── fileio_r2.go    # R2 FileIO implementation
+│   │   ├── fileio_local.go # Local filesystem implementation
+│   │   ├── fileio_factory.go # FileIO factory
+│   │   └── http.go         # HTTP utilities for catalog communication
+│   └── logger/             # Logging utilities
+│       └── logger.go       # Verbosity-based logging wrapper
 ├── example/
 │   ├── otel-config.yaml    # Example collector configuration
-│   └── docker-compose.yml  # Local development setup
+│   └── docker-compose.yaml # Local development setup (MinIO + Nessie)
 ├── builder-config.yaml     # OpenTelemetry Collector Builder config
 ├── Dockerfile              # Container build
 └── Makefile
@@ -135,7 +138,7 @@ Used when `catalog.type` is `rest`.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `uri` | string | **Yes** | - | REST catalog endpoint URL |
-| `warehouse` | string | No | - | Warehouse location (e.g., `s3://bucket/warehouse`) |
+| `warehouse` | string | No | - | Warehouse name or location (catalog-specific, e.g., `warehouse` for Nessie, `s3://bucket/warehouse` for others) |
 | `token` | string | No | - | Bearer token for authentication |
 
 ##### Table Names (`catalog.tables`)
@@ -173,6 +176,19 @@ Individual table names (e.g., `metrics_gauge`) override the prefix-based naming.
 
 ---
 
+#### Verbosity Configuration
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `verbosity` | string | No | `normal` | Logging verbosity level: `basic`, `normal`, `detailed` |
+
+**Logging behavior by verbosity level:**
+- `basic`: Only Error and Warn are output (silent on success)
+- `normal`: Error, Warn, and Info are output
+- `detailed`: Error, Warn, Info, and Debug are output
+
+---
+
 #### Standard OTel Exporter Settings
 
 | Field | Type | Required | Default | Description |
@@ -180,6 +196,7 @@ Individual table names (e.g., `metrics_gauge`) override the prefix-based naming.
 | `timeout` | duration | No | `5s` | Export timeout |
 | `sending_queue.enabled` | bool | No | `true` | Enable sending queue |
 | `sending_queue.num_consumers` | int | No | `10` | Number of queue consumers |
+| `sending_queue.storage` | string | No | - | Reference to file_storage extension for persistent queue |
 | `retry_on_failure.enabled` | bool | No | `true` | Enable retry on failure |
 | `retry_on_failure.max_elapsed_time` | duration | No | `300s` | Maximum retry duration |
 
@@ -192,6 +209,9 @@ Individual table names (e.g., `metrics_gauge`) override the prefix-based naming.
 ```yaml
 exporters:
   iceberg:
+    # Verbosity level for exporter logging
+    verbosity: normal  # "basic", "normal", "detailed"
+
     # Storage configuration (required)
     storage:
       type: s3  # "s3", "r2", or "filesystem"
@@ -214,7 +234,7 @@ exporters:
       # REST catalog settings (when type is "rest")
       # rest:
       #   uri: http://nessie:19120/iceberg
-      #   warehouse: s3://my-bucket/warehouse
+      #   warehouse: warehouse
 
     # Partition configuration
     partition:
@@ -226,6 +246,8 @@ exporters:
     sending_queue:
       enabled: true
       num_consumers: 10
+      # Optional: persistent queue using file_storage extension (survives restarts)
+      # storage: file_storage/iceberg
     retry_on_failure:
       enabled: true
       max_elapsed_time: 300s
@@ -303,12 +325,36 @@ catalog:
     token: ${env:ICEBERG_TOKEN}  # Bearer token
 ```
 
+#### Persistent Queue (survives collector restarts)
+```yaml
+extensions:
+  file_storage/iceberg:
+    directory: /var/lib/otelcol/iceberg-queue
+    create_directory: true
+    timeout: 10s
+    compaction:
+      on_start: true
+      on_rebound: true
+
+exporters:
+  iceberg:
+    # ... storage and catalog config ...
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      storage: file_storage/iceberg  # Reference to file_storage extension
+
+service:
+  extensions: [file_storage/iceberg]
+  # ... pipelines ...
+```
+
 ## Quick Start
 
-### Local Development with MinIO
+### Local Development with MinIO and Nessie
 
 ```bash
-# Start MinIO, the collector, and telemetry generators
+# Start MinIO, Nessie, the collector, and telemetry generators
 make docker-up
 
 # View collector logs
@@ -317,13 +363,16 @@ make docker-logs
 # Access MinIO console at http://localhost:9001
 # Username: minioadmin, Password: minioadmin
 
+# Access Nessie REST API at http://localhost:19120
+
 # Stop all services
 make docker-down
 ```
 
 The example setup includes:
 - MinIO for S3-compatible storage
-- OpenTelemetry Collector with the Iceberg exporter
+- Nessie as the Iceberg REST Catalog
+- OpenTelemetry Collector with the Iceberg exporter (with persistent queue)
 - Telemetrygen containers generating sample traces, metrics, and logs
 
 ### With AWS S3
