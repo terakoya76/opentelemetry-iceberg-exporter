@@ -84,7 +84,6 @@ func (f *S3FileIO) Write(ctx context.Context, filePath string, data []byte, opts
 }
 
 // List implements FileIO.List.
-// Lists all objects under the specified prefix in the S3 bucket.
 func (f *S3FileIO) List(ctx context.Context, prefix string) ([]FileInfo, error) {
 	var files []FileInfo
 
@@ -127,7 +126,6 @@ func (f *S3FileIO) List(ctx context.Context, prefix string) ([]FileInfo, error) 
 }
 
 // Read implements FileIO.Read.
-// Reads the entire contents of a file from S3.
 func (f *S3FileIO) Read(ctx context.Context, filePath string) ([]byte, error) {
 	key := f.buildKey(filePath)
 
@@ -146,6 +144,21 @@ func (f *S3FileIO) Read(ctx context.Context, filePath string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// Delete implements FileIO.Delete.
+func (f *S3FileIO) Delete(ctx context.Context, filePath string) error {
+	key := f.buildKey(filePath)
+
+	_, err := f.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(f.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete S3 object %s: %w", key, err)
+	}
+
+	return nil
 }
 
 // Close implements FileIO.Close.

@@ -25,8 +25,8 @@ func (c *NoCatalog) EnsureTable(_ context.Context, _, _ string, _ *arrow.Schema,
 	return nil
 }
 
-// AppendDataFile implements Catalog.AppendDataFile (no-op).
-func (c *NoCatalog) AppendDataFile(_ context.Context, _ AppendOptions) error {
+// AppendDataFiles implements Catalog.AppendDataFiles (no-op).
+func (c *NoCatalog) AppendDataFiles(_ context.Context, _ []AppendOptions) error {
 	return nil
 }
 

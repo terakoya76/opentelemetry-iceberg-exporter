@@ -131,7 +131,6 @@ func (e *icebergExporter) consumeTraces(ctx context.Context, traces ptrace.Trace
 			Data:        data,
 			RecordCount: pb.RecordCount,
 			Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-			ServiceName: serviceName,
 		}
 
 		if err := e.writer.Write(ctx, opts); err != nil {
@@ -209,7 +208,6 @@ func (e *icebergExporter) consumeMetrics(ctx context.Context, metrics pmetric.Me
 				Data:        data,
 				RecordCount: pb.RecordCount,
 				Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-				ServiceName: serviceName,
 			}
 
 			if writeErr := e.writer.Write(ctx, opts); writeErr != nil {
@@ -282,7 +280,6 @@ func (e *icebergExporter) consumeLogs(ctx context.Context, logs plog.Logs) error
 			Data:        data,
 			RecordCount: pb.RecordCount,
 			Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-			ServiceName: serviceName,
 		}
 
 		if err := e.writer.Write(ctx, opts); err != nil {

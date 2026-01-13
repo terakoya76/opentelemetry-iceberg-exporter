@@ -83,7 +83,6 @@ func (f *R2FileIO) Write(ctx context.Context, filePath string, data []byte, opts
 }
 
 // List implements FileIO.List.
-// Lists all objects under the specified prefix in the R2 bucket.
 func (f *R2FileIO) List(ctx context.Context, prefix string) ([]FileInfo, error) {
 	var files []FileInfo
 
@@ -126,7 +125,6 @@ func (f *R2FileIO) List(ctx context.Context, prefix string) ([]FileInfo, error) 
 }
 
 // Read implements FileIO.Read.
-// Reads the entire contents of a file from R2.
 func (f *R2FileIO) Read(ctx context.Context, filePath string) ([]byte, error) {
 	key := f.buildKey(filePath)
 
@@ -147,6 +145,21 @@ func (f *R2FileIO) Read(ctx context.Context, filePath string) ([]byte, error) {
 	return data, nil
 }
 
+// Delete implements FileIO.Delete.
+func (f *R2FileIO) Delete(ctx context.Context, filePath string) error {
+	key := f.buildKey(filePath)
+
+	_, err := f.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(f.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete R2 object %s: %w", key, err)
+	}
+
+	return nil
+}
+
 // Close implements FileIO.Close.
 func (f *R2FileIO) Close() error {
 	// R2 client doesn't need explicit cleanup
@@ -154,7 +167,6 @@ func (f *R2FileIO) Close() error {
 }
 
 // GetURI implements FileIO.GetURI.
-// R2 uses S3-compatible URIs for query engine compatibility.
 func (f *R2FileIO) GetURI(filePath string) string {
 	key := f.buildKey(filePath)
 	// Use S3 URI format for compatibility with query engines

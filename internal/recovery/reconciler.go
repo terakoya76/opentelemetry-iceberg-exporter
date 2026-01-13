@@ -12,11 +12,20 @@ import (
 
 // Reconciler compares storage files against the catalog and recovers orphaned files.
 type Reconciler struct {
-	scanner   *Scanner
-	catalog   iceberg.Catalog
-	fileIO    iceberg.FileIO
-	namespace string
-	logger    *logger.VerboseLogger
+	scanner       *Scanner
+	catalog       iceberg.Catalog
+	fileIO        iceberg.FileIO
+	namespace     string
+	logger        *logger.VerboseLogger
+	repartitioner *Repartitioner
+}
+
+// ReconcilerConfig holds configuration for the Reconciler.
+type ReconcilerConfig struct {
+	// Timezone for partition calculation (default: "UTC")
+	Timezone string
+	// Compression for re-partitioned files (default: "snappy")
+	Compression string
 }
 
 // NewReconciler creates a new Reconciler.
@@ -25,14 +34,35 @@ func NewReconciler(
 	catalog iceberg.Catalog,
 	namespace string,
 	vlogger *logger.VerboseLogger,
-) *Reconciler {
-	return &Reconciler{
-		scanner:   NewScanner(fileIO, vlogger),
-		catalog:   catalog,
-		fileIO:    fileIO,
-		namespace: namespace,
-		logger:    vlogger,
+	cfg ...ReconcilerConfig,
+) (*Reconciler, error) {
+	// Apply config with defaults
+	config := ReconcilerConfig{
+		Timezone:    "UTC",
+		Compression: "snappy",
 	}
+	if len(cfg) > 0 {
+		if cfg[0].Timezone != "" {
+			config.Timezone = cfg[0].Timezone
+		}
+		if cfg[0].Compression != "" {
+			config.Compression = cfg[0].Compression
+		}
+	}
+
+	repartitioner, err := NewRepartitioner(fileIO, config.Timezone, config.Compression, vlogger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create repartitioner: %w", err)
+	}
+
+	return &Reconciler{
+		scanner:       NewScanner(fileIO, vlogger),
+		catalog:       catalog,
+		fileIO:        fileIO,
+		namespace:     namespace,
+		logger:        vlogger,
+		repartitioner: repartitioner,
+	}, nil
 }
 
 // ListFiles scans storage and returns all parquet files found.
@@ -88,7 +118,7 @@ func (r *Reconciler) GetRegisteredFiles(ctx context.Context, namespace string, t
 			registeredFiles[filePath] = struct{}{}
 		}
 
-		r.logger.Debug("found registered files for table",
+		r.logger.Info("found registered files for table",
 			zap.String("namespace", namespace),
 			zap.String("table", tableName),
 			zap.Int("count", len(files)))
@@ -113,6 +143,78 @@ func extractTableNames(files []DataFile) []string {
 	return tables
 }
 
+// handleCrossPartitionFile handles re-partitioning and registration of files that span multiple partitions.
+func (r *Reconciler) handleCrossPartitionFile(ctx context.Context, file DataFile, originalErr error, result *RecoveryResult) {
+	r.logger.Warn("file spans multiple partitions, attempting re-partition",
+		zap.String("file", file.Path),
+		zap.Error(originalErr))
+
+	repartitioned, err := r.repartitioner.Repartition(ctx, file)
+	if err != nil {
+		result.FailureCount++
+		result.Errors = append(result.Errors, FileError{
+			File:  file,
+			Error: fmt.Sprintf("re-partition failed: %v (original error: %v)", err, originalErr),
+		})
+		return
+	}
+
+	if len(repartitioned) == 0 {
+		return
+	}
+
+	// Collect all append options for atomic batch registration
+	appendOpts := make([]iceberg.AppendOptions, 0, len(repartitioned))
+	for _, rf := range repartitioned {
+		appendOpts = append(appendOpts, iceberg.AppendOptions{
+			Namespace:       r.namespace,
+			Table:           rf.DataFile.TableName,
+			FilePath:        rf.DataFile.URI,
+			FileSizeBytes:   rf.DataFile.Size,
+			RecordCount:     rf.DataFile.RecordCount,
+			PartitionValues: rf.DataFile.PartitionValues,
+		})
+	}
+
+	// Register all repartitioned files atomically
+	if err = r.catalog.AppendDataFiles(ctx, appendOpts); err != nil {
+		// Atomic registration failed - all files failed
+		result.FailureCount += len(repartitioned)
+		for _, rf := range repartitioned {
+			result.Errors = append(result.Errors, FileError{
+				File:  rf.DataFile,
+				Error: fmt.Sprintf("re-partitioned file registration failed: %v", err),
+			})
+		}
+		r.logger.Error("failed to register repartitioned files",
+			zap.String("original_file", file.Path),
+			zap.Int("file_count", len(repartitioned)),
+			zap.Error(err))
+		return
+	}
+
+	// All files registered successfully
+	result.SuccessCount += len(repartitioned)
+	for _, rf := range repartitioned {
+		result.RegisteredFiles = append(result.RegisteredFiles, rf.DataFile)
+	}
+	r.logger.Info("successfully registered all re-partitioned files",
+		zap.String("original_file", file.Path),
+		zap.Int("file_count", len(repartitioned)))
+
+	// Delete original file since all repartitioned files were registered successfully
+	if err := r.fileIO.Delete(ctx, file.Path); err != nil {
+		// Log error but don't count as failure since data is safely registered
+		r.logger.Error("failed to delete original file after successful repartition",
+			zap.String("path", file.Path),
+			zap.Error(err))
+	} else {
+		result.DeletedRepartitionedOriginalFiles = append(result.DeletedRepartitionedOriginalFiles, file.Path)
+		r.logger.Info("deleted original file after successful repartition",
+			zap.String("path", file.Path))
+	}
+}
+
 // RecoverFiles attempts to register orphaned files with the catalog.
 // Files should be pre-filtered to exclude already-registered files.
 func (r *Reconciler) RecoverFiles(ctx context.Context, files []DataFile, opts RecoveryOptions) (*RecoveryResult, error) {
@@ -129,42 +231,37 @@ func (r *Reconciler) RecoverFiles(ctx context.Context, files []DataFile, opts Re
 		return result, nil
 	}
 
-	// Check if catalog is enabled
 	if r.catalog.GetCatalogType() == "none" {
 		return nil, fmt.Errorf("catalog is not configured (type=none)")
 	}
 
 	for _, file := range files {
-		r.logger.Debug("registering file",
-			zap.String("file", file.Path),
-			zap.String("table", file.TableName),
-			zap.String("uri", file.URI))
-
-		appendOpts := iceberg.AppendOptions{
+		appendOpts := []iceberg.AppendOptions{{
 			Namespace:       r.namespace,
 			Table:           file.TableName,
 			FilePath:        file.URI,
 			FileSizeBytes:   file.Size,
 			RecordCount:     file.RecordCount,
 			PartitionValues: file.PartitionValues,
-		}
+		}}
 
-		if err := r.catalog.AppendDataFile(ctx, appendOpts); err != nil {
-			r.logger.Error("failed to register file",
-				zap.String("file", file.Path),
-				zap.Error(err))
-			result.FailureCount++
-			result.Errors = append(result.Errors, FileError{
-				File:  file,
-				Error: err.Error(),
-			})
-		} else {
-			r.logger.Info("successfully registered file",
-				zap.String("file", file.Path),
-				zap.String("table", file.TableName))
+		err := r.catalog.AppendDataFiles(ctx, appendOpts)
+		if err == nil {
 			result.SuccessCount++
 			result.RegisteredFiles = append(result.RegisteredFiles, file)
+			continue
 		}
+
+		if IsCrossPartitionError(err) {
+			r.handleCrossPartitionFile(ctx, file, err, result)
+			continue
+		}
+
+		result.FailureCount++
+		result.Errors = append(result.Errors, FileError{
+			File:  file,
+			Error: err.Error(),
+		})
 	}
 
 	return result, nil

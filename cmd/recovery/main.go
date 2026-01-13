@@ -226,7 +226,10 @@ func runRecovery(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = catalog.Close() }()
 
 	// Create reconciler
-	reconciler := recovery.NewReconciler(fileIO, catalog, namespace, vlogger)
+	reconciler, err := recovery.NewReconciler(fileIO, catalog, namespace, vlogger)
+	if err != nil {
+		return fmt.Errorf("failed to create reconciler: %w", err)
+	}
 
 	// Parse time flags
 	after, err := parseTimeFlag(afterTime)

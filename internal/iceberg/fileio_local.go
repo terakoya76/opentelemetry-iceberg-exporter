@@ -51,7 +51,6 @@ func (f *LocalFileIO) Write(_ context.Context, filePath string, data []byte, _ W
 }
 
 // List implements FileIO.List.
-// Lists all files under the specified prefix in the local filesystem.
 func (f *LocalFileIO) List(_ context.Context, prefix string) ([]FileInfo, error) {
 	var files []FileInfo
 
@@ -99,7 +98,6 @@ func (f *LocalFileIO) List(_ context.Context, prefix string) ([]FileInfo, error)
 }
 
 // Read implements FileIO.Read.
-// Reads the entire contents of a file from the local filesystem.
 func (f *LocalFileIO) Read(_ context.Context, filePath string) ([]byte, error) {
 	fullPath := filepath.Join(f.basePath, filePath)
 
@@ -109,6 +107,22 @@ func (f *LocalFileIO) Read(_ context.Context, filePath string) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// Delete implements FileIO.Delete.
+func (f *LocalFileIO) Delete(_ context.Context, filePath string) error {
+	fullPath := filepath.Join(f.basePath, filePath)
+
+	err := os.Remove(fullPath)
+	if err != nil {
+		// Return nil if file doesn't exist (idempotent delete)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete local file %s: %w", fullPath, err)
+	}
+
+	return nil
 }
 
 // Close implements FileIO.Close.

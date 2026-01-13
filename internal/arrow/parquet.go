@@ -3,6 +3,7 @@ package arrow
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/klauspost/compress/snappy"
 	"github.com/klauspost/compress/zstd"
@@ -56,6 +58,86 @@ func stripFieldIDMetadata(schema *arrow.Schema) *arrow.Schema {
 	// Preserve schema-level metadata (e.g., schema version info)
 	meta := schema.Metadata()
 	return arrow.NewSchema(fields, &meta)
+}
+
+// ReadParquet reads parquet data into an Arrow RecordBatch.
+// The caller is responsible for releasing the returned RecordBatch.
+func ReadParquet(data []byte) (result arrow.RecordBatch, err error) {
+	// Create a parquet file reader from the byte buffer
+	// bytes.Reader implements io.ReaderAt and io.Seeker which satisfies parquet.ReaderAtSeeker
+	pf, err := file.NewParquetReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open parquet file: %w", err)
+	}
+	defer func() { _ = pf.Close() }()
+
+	// Collect file metadata for diagnostics before attempting to read
+	fileMeta := collectParquetMetadata(pf)
+
+	reader, err := pqarrow.NewFileReader(pf, pqarrow.ArrowReadProperties{}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parquet reader: %w", err)
+	}
+
+	// Recover from panics in arrow-go library
+	// This provides graceful error handling for corrupted files or library bugs
+	// - https://github.com/apache/arrow-go/issues/613
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic while reading parquet data: %v (file info: %s)", r, fileMeta)
+			result = nil
+		}
+	}()
+
+	// Read all row groups into a table
+	ctx := context.Background()
+	table, err := reader.ReadTable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parquet table: %w (file info: %s)", err, fileMeta)
+	}
+	defer table.Release()
+
+	// Convert table to a single RecordBatch
+	// If table has multiple chunks, we need to combine them
+	tableReader := array.NewTableReader(table, table.NumRows())
+	defer tableReader.Release()
+
+	if !tableReader.Next() {
+		return nil, fmt.Errorf("no data in parquet file (file info: %s)", fileMeta)
+	}
+
+	record := tableReader.RecordBatch()
+	record.Retain() // Retain because we're returning it
+
+	return record, nil
+}
+
+// collectParquetMetadata gathers diagnostic information from a parquet file.
+func collectParquetMetadata(pf *file.Reader) string {
+	meta := pf.MetaData()
+	if meta == nil {
+		return "metadata unavailable"
+	}
+
+	numRowGroups := pf.NumRowGroups()
+	numRows := meta.NumRows
+	numCols := meta.Schema.NumColumns()
+
+	// Collect column names for diagnostics
+	var colNames []string
+	schema := meta.Schema
+	for i := 0; i < min(numCols, 5); i++ { // Limit to first 5 columns
+		col := schema.Column(i)
+		if col != nil {
+			colNames = append(colNames, col.Name())
+		}
+	}
+	if numCols > 5 {
+		colNames = append(colNames, fmt.Sprintf("... and %d more", numCols-5))
+	}
+
+	return fmt.Sprintf("row_groups=%d, rows=%d, cols=%d, columns=%v",
+		numRowGroups, numRows, numCols, colNames)
 }
 
 // WriteParquet writes an Arrow record to a Parquet buffer.

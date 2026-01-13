@@ -27,6 +27,11 @@ type FileIO interface {
 	// The path should be relative to the configured base location.
 	Read(ctx context.Context, path string) ([]byte, error)
 
+	// Delete deletes a file at the specified path.
+	// The path should be relative to the configured base location.
+	// Returns nil if the file was successfully deleted or if the file did not exist.
+	Delete(ctx context.Context, path string) error
+
 	// Close releases any resources held by the FileIO.
 	Close() error
 

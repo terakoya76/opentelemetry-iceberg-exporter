@@ -19,7 +19,7 @@ import (
 type IcebergWriter struct {
 	fileIO        iceberg.FileIO
 	catalog       iceberg.Catalog
-	pathGenerator *PathGenerator
+	pathGenerator *iceberg.PathGenerator
 	tableNames    iceberg.TableNamesConfig
 	namespace     string
 	granularity   string
@@ -74,10 +74,9 @@ func NewIcebergWriter(ctx context.Context, cfg WriterConfig, vlogger *logger.Ver
 	}
 
 	// Create path generator
-	pathConfig := PathConfig{
-		Granularity:        cfg.Partition.Granularity,
-		Timezone:           cfg.Partition.Timezone,
-		IncludeServiceName: false, // Can be made configurable
+	pathConfig := iceberg.PathConfig{
+		Granularity: cfg.Partition.Granularity,
+		Timezone:    cfg.Partition.Timezone,
 	}
 	if pathConfig.Granularity == "" {
 		pathConfig.Granularity = "hourly"
@@ -86,7 +85,7 @@ func NewIcebergWriter(ctx context.Context, cfg WriterConfig, vlogger *logger.Ver
 		pathConfig.Timezone = "UTC"
 	}
 
-	pathGen, err := NewPathGenerator(pathConfig)
+	pathGen, err := iceberg.NewPathGenerator(pathConfig)
 	if err != nil {
 		// Close resources on error (ignore close errors since we're already returning an error)
 		_ = fileIO.Close()
@@ -124,9 +123,6 @@ type WriteOptions struct {
 
 	// Timestamp is the timestamp for partitioning
 	Timestamp time.Time
-
-	// ServiceName is the service name (optional, for partitioning)
-	ServiceName string
 }
 
 // Write writes data to storage and registers it with the catalog.
@@ -141,10 +137,9 @@ func (w *IcebergWriter) Write(ctx context.Context, opts WriteOptions) error {
 	tableName := w.tableNames.GetTableName(opts.SignalType)
 
 	// Step 1: Generate Iceberg-compatible path and compute recovery info upfront
-	pathOpts := PathOptions{
-		TableName:   tableName,
-		Timestamp:   opts.Timestamp,
-		ServiceName: opts.ServiceName,
+	pathOpts := iceberg.PathOptions{
+		TableName: tableName,
+		Timestamp: opts.Timestamp,
 	}
 	path := w.pathGenerator.GeneratePath(pathOpts)
 	fileURI := w.fileIO.GetURI(path)
@@ -161,7 +156,6 @@ func (w *IcebergWriter) Write(ctx context.Context, opts WriteOptions) error {
 			zap.String("target_path", path),
 			zap.String("target_uri", fileURI),
 			zap.Time("timestamp", opts.Timestamp),
-			zap.String("service_name", opts.ServiceName),
 			zap.Int64("record_count", opts.RecordCount),
 			zap.Int("data_size_bytes", len(opts.Data)),
 			zap.Error(err))
@@ -255,20 +249,19 @@ func (w *IcebergWriter) ensureTableExists(ctx context.Context, tableName string,
 func (w *IcebergWriter) registerWithCatalog(ctx context.Context, tableName, path string, opts WriteOptions) error {
 	fileURI := w.fileIO.GetURI(path)
 
-	appendOpts := iceberg.AppendOptions{
+	appendOpts := []iceberg.AppendOptions{{
 		Namespace:     w.namespace,
 		Table:         tableName,
 		FilePath:      fileURI,
 		FileSizeBytes: int64(len(opts.Data)),
 		RecordCount:   opts.RecordCount,
-		PartitionValues: w.pathGenerator.ExtractPartitionValues(PathOptions{
-			TableName:   tableName,
-			Timestamp:   opts.Timestamp,
-			ServiceName: opts.ServiceName,
+		PartitionValues: w.pathGenerator.ExtractPartitionValues(iceberg.PathOptions{
+			TableName: tableName,
+			Timestamp: opts.Timestamp,
 		}),
-	}
+	}}
 
-	return w.catalog.AppendDataFile(ctx, appendOpts)
+	return w.catalog.AppendDataFiles(ctx, appendOpts)
 }
 
 // Close closes the writer and releases resources.

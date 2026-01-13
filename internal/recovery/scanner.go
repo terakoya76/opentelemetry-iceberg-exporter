@@ -87,7 +87,7 @@ func (s *Scanner) ScanPrefix(ctx context.Context, prefix string, opts ...ScanOpt
 		result = append(result, df)
 	}
 
-	s.logger.Info("storage scan complete",
+	s.logger.Debug("storage scan complete",
 		zap.Int("total_files", len(result)),
 		zap.Int("tables_found", countUniqueTables(result)))
 

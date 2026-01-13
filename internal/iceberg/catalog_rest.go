@@ -77,7 +77,7 @@ func NewRESTCatalog(ctx context.Context, cfg RESTCatalogConfig, storageCfg FileI
 	if cfg.Warehouse != "" {
 		opts = append(opts, rest.WithWarehouseLocation(cfg.Warehouse))
 	}
-	// Inject AWS config into REST catalog options as well (for S3/R2 file access)
+
 	if awsCfg != nil {
 		opts = append(opts, rest.WithAwsConfig(*awsCfg))
 	}
@@ -187,7 +187,6 @@ func (c *RESTCatalog) EnsureTable(ctx context.Context, namespace, tableName stri
 		return nil
 	}
 
-	// Log the LoadTable error for debugging
 	c.logger.Debug("table does not exist or cannot be loaded, will attempt to create",
 		zap.String("namespace", namespace),
 		zap.String("table", tableName),
@@ -239,53 +238,73 @@ func (c *RESTCatalog) EnsureTable(ctx context.Context, namespace, tableName stri
 	return nil
 }
 
-// AppendDataFile implements Catalog.AppendDataFile.
-// Registers a data file with the Iceberg table using iceberg-go's transaction API.
-func (c *RESTCatalog) AppendDataFile(ctx context.Context, opts AppendOptions) error {
-	c.logger.Debug("appending data file to table",
-		zap.String("namespace", opts.Namespace),
-		zap.String("table", opts.Table),
-		zap.String("file", opts.FilePath),
-		zap.Int64("records", opts.RecordCount),
-		zap.Int64("size", opts.FileSizeBytes))
+// AppendDataFiles implements Catalog.AppendDataFiles.
+func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions) error {
+	if len(opts) == 0 {
+		return nil
+	}
+
+	// All files must belong to the same namespace and table
+	namespace := opts[0].Namespace
+	table := opts[0].Table
+
+	// Collect file paths and calculate totals
+	filePaths := make([]string, 0, len(opts))
+	var totalRecords, totalSize int64
+	for _, opt := range opts {
+		if opt.Namespace != namespace || opt.Table != table {
+			return fmt.Errorf("all files must belong to the same namespace and table, got %s.%s and %s.%s",
+				namespace, table, opt.Namespace, opt.Table)
+		}
+		filePaths = append(filePaths, opt.FilePath)
+		totalRecords += opt.RecordCount
+		totalSize += opt.FileSizeBytes
+	}
+
+	c.logger.Debug("appending data files to table",
+		zap.String("namespace", namespace),
+		zap.String("table", table),
+		zap.Int("file_count", len(filePaths)),
+		zap.Int64("total_records", totalRecords),
+		zap.Int64("total_size", totalSize))
 
 	if c.awsConfig != nil {
 		ctx = utils.WithAwsConfig(ctx, c.awsConfig)
 	}
 
-	tableIdent := catalog.ToIdentifier(opts.Namespace, opts.Table)
-	table, err := c.catalog.LoadTable(ctx, tableIdent)
+	tableIdent := catalog.ToIdentifier(namespace, table)
+	tbl, err := c.catalog.LoadTable(ctx, tableIdent)
 	if err != nil {
-		return fmt.Errorf("failed to load table %s.%s: %w", opts.Namespace, opts.Table, err)
+		return fmt.Errorf("failed to load table %s.%s: %w", namespace, table, err)
 	}
 
-	tx := table.NewTransaction()
+	tx := tbl.NewTransaction()
 	snapshotProps := iceberg.Properties{
 		"otel.exporter":     "iceberg",
-		"otel.record_count": fmt.Sprintf("%d", opts.RecordCount),
-		"otel.file_size":    fmt.Sprintf("%d", opts.FileSizeBytes),
+		"otel.record_count": fmt.Sprintf("%d", totalRecords),
+		"otel.file_size":    fmt.Sprintf("%d", totalSize),
+		"otel.file_count":   fmt.Sprintf("%d", len(filePaths)),
 	}
 
-	if err := tx.AddFiles(ctx, []string{opts.FilePath}, snapshotProps, false); err != nil {
-		return fmt.Errorf("failed to add file %s to table %s.%s: %w", opts.FilePath, opts.Namespace, opts.Table, err)
+	if err := tx.AddFiles(ctx, filePaths, snapshotProps, false); err != nil {
+		return fmt.Errorf("failed to add files to table %s.%s: %w", namespace, table, err)
 	}
 
 	if _, err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction for table %s.%s: %w", opts.Namespace, opts.Table, err)
+		return fmt.Errorf("failed to commit transaction for table %s.%s: %w", namespace, table, err)
 	}
 
-	c.logger.Info("successfully registered data file",
-		zap.String("namespace", opts.Namespace),
-		zap.String("table", opts.Table),
-		zap.String("file", opts.FilePath))
+	c.logger.Info("successfully registered data files",
+		zap.String("namespace", namespace),
+		zap.String("table", table),
+		zap.Int("file_count", len(filePaths)))
 
 	return nil
 }
 
 // ListDataFiles implements Catalog.ListDataFiles.
-// Returns the list of data file paths registered with the table by reading the manifest.
 func (c *RESTCatalog) ListDataFiles(ctx context.Context, namespace, tableName string) ([]string, error) {
-	c.logger.Debug("listing data files from manifest",
+	c.logger.Debug("listing data files from all snapshots",
 		zap.String("namespace", namespace),
 		zap.String("table", tableName))
 
@@ -308,14 +327,21 @@ func (c *RESTCatalog) ListDataFiles(ctx context.Context, namespace, tableName st
 		return nil, fmt.Errorf("failed to load table %s.%s: %w", namespace, tableName, err)
 	}
 
-	// Get the current snapshot
-	snapshot := table.CurrentSnapshot()
-	if snapshot == nil {
+	// Get all snapshots from the table metadata (includes historical snapshots for time-travel)
+	// This ensures that files removed from the current snapshot by operations like rewrite_data_files
+	// but still referenced by older snapshots are correctly identified as registered files.
+	snapshots := table.Metadata().Snapshots()
+	if len(snapshots) == 0 {
 		c.logger.Debug("table has no snapshots, returning empty file list",
 			zap.String("namespace", namespace),
 			zap.String("table", tableName))
 		return []string{}, nil
 	}
+
+	c.logger.Debug("found snapshots to scan",
+		zap.String("namespace", namespace),
+		zap.String("table", tableName),
+		zap.Int("snapshot_count", len(snapshots)))
 
 	// Get the file IO from the table for reading manifests
 	fileIO, err := table.FS(ctx)
@@ -323,40 +349,54 @@ func (c *RESTCatalog) ListDataFiles(ctx context.Context, namespace, tableName st
 		return nil, fmt.Errorf("failed to get file IO for table %s.%s: %w", namespace, tableName, err)
 	}
 
-	// Get manifests from the snapshot
-	manifests, err := snapshot.Manifests(fileIO)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read manifests for table %s.%s: %w", namespace, tableName, err)
-	}
+	// Use a map to deduplicate file paths across snapshots
+	filePathSet := make(map[string]struct{})
 
-	// Collect all data file paths from manifests
-	var filePaths []string
-	for _, manifest := range manifests {
-		// Skip delete manifests, we only want data files
-		if manifest.ManifestContent() != iceberg.ManifestContentData {
-			continue
-		}
-
-		// Fetch manifest entries (skip deleted entries)
-		entries, err := manifest.FetchEntries(fileIO, true)
+	// Iterate through ALL snapshots to collect all data files
+	for _, snapshot := range snapshots {
+		manifests, err := snapshot.Manifests(fileIO)
 		if err != nil {
-			c.logger.Warn("failed to read manifest entries, skipping manifest",
-				zap.String("manifest", manifest.FilePath()),
+			c.logger.Warn("failed to read manifests for snapshot, skipping",
+				zap.Int64("snapshot_id", snapshot.SnapshotID),
 				zap.Error(err))
 			continue
 		}
 
-		for _, entry := range entries {
-			// Only include active data files (not deleted)
-			if entry.Status() != iceberg.EntryStatusDELETED {
-				filePaths = append(filePaths, entry.DataFile().FilePath())
+		for _, manifest := range manifests {
+			// Skip delete manifests, we only want data files
+			if manifest.ManifestContent() != iceberg.ManifestContentData {
+				continue
+			}
+
+			// Fetch manifest entries (skip deleted entries within the manifest)
+			entries, err := manifest.FetchEntries(fileIO, true)
+			if err != nil {
+				c.logger.Warn("failed to read manifest entries, skipping manifest",
+					zap.String("manifest", manifest.FilePath()),
+					zap.Int64("snapshot_id", snapshot.SnapshotID),
+					zap.Error(err))
+				continue
+			}
+
+			for _, entry := range entries {
+				// Include all data files regardless of status within the manifest entry,
+				// because a file marked as DELETED in one snapshot may still be
+				// EXISTING/ADDED in an older snapshot that we need to track
+				filePathSet[entry.DataFile().FilePath()] = struct{}{}
 			}
 		}
 	}
 
-	c.logger.Info("listed data files from manifest",
+	// Convert map to slice
+	filePaths := make([]string, 0, len(filePathSet))
+	for path := range filePathSet {
+		filePaths = append(filePaths, path)
+	}
+
+	c.logger.Debug("listed data files from all snapshots",
 		zap.String("namespace", namespace),
 		zap.String("table", tableName),
+		zap.Int("snapshot_count", len(snapshots)),
 		zap.Int("file_count", len(filePaths)))
 
 	return filePaths, nil

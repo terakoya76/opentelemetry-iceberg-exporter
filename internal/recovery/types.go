@@ -52,6 +52,9 @@ type RecoveryResult struct {
 
 	// RegisteredFiles contains details about successfully registered files.
 	RegisteredFiles []DataFile
+
+	// DeletedRepartitionedOriginalFiles contains paths of original files that were deleted.
+	DeletedRepartitionedOriginalFiles []string
 }
 
 // FileError represents an error that occurred while processing a file.

@@ -19,9 +19,9 @@ type Catalog interface {
 	// Returns nil if table already exists (does not update schema).
 	EnsureTable(ctx context.Context, namespace, table string, schema *arrow.Schema, partitionSpec PartitionSpec) error
 
-	// AppendDataFile registers a new data file with a table.
-	// This should be called after the file has been written to storage.
-	AppendDataFile(ctx context.Context, opts AppendOptions) error
+	// AppendDataFiles registers one or more data files with a table atomically.
+	// All files must belong to the same namespace and table.
+	AppendDataFiles(ctx context.Context, opts []AppendOptions) error
 
 	// ListDataFiles returns a list of data file paths registered with the table.
 	// Returns the full URIs of all data files in the current snapshot's manifests.
