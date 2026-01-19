@@ -10,6 +10,16 @@ import (
 	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/logger"
 )
 
+const (
+	// maxBatchSize is the maximum number of files to batch in a single AppendDataFiles call.
+	// Batching improves performance by reducing the number of catalog transactions.
+	maxBatchSize = 1000
+
+	// batchSizeDivisor is used to reduce batch size when a batch operation fails.
+	// For example, with divisor 10: 1000 -> 100 -> 10 -> 1
+	batchSizeDivisor = 10
+)
+
 // Reconciler compares storage files against the catalog and recovers orphaned files.
 type Reconciler struct {
 	scanner       *Scanner
@@ -65,6 +75,70 @@ func NewReconciler(
 	}, nil
 }
 
+// Recover performs the full recovery process: scan, find orphans, and register.
+// Queries the catalog manifest to identify already-registered files,
+// then only registers truly orphaned files.
+func (r *Reconciler) Recover(ctx context.Context, opts RecoveryOptions) (*RecoveryResult, error) {
+	r.logger.Info("starting recovery process",
+		zap.String("namespace", r.namespace),
+		zap.Strings("tables", opts.Tables),
+		zap.Bool("dry_run", opts.DryRun))
+
+	files, err := r.ListFiles(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	r.logger.Info("found files in storage", zap.Int("count", len(files)))
+
+	if len(files) == 0 {
+		return &RecoveryResult{TotalFiles: 0}, nil
+	}
+
+	// Get already-registered files from the catalog manifest
+	tableNames := extractTableNames(files)
+	registeredFiles, err := r.GetRegisteredFiles(ctx, r.namespace, tableNames)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get registered files: %w", err)
+	}
+
+	r.logger.Info("retrieved registered files from catalog",
+		zap.Int("registered_count", len(registeredFiles)))
+
+	// Filter out already-registered files
+	var orphanedFiles []DataFile
+	var alreadyRegisteredCount int
+	for _, file := range files {
+		if _, exists := registeredFiles[file.URI]; exists {
+			alreadyRegisteredCount++
+		} else {
+			orphanedFiles = append(orphanedFiles, file)
+		}
+	}
+
+	r.logger.Info("identified orphaned files",
+		zap.Int("total_files", len(files)),
+		zap.Int("already_registered", alreadyRegisteredCount),
+		zap.Int("orphaned", len(orphanedFiles)))
+
+	if len(orphanedFiles) == 0 {
+		return &RecoveryResult{
+			TotalFiles:   len(files),
+			SkippedCount: alreadyRegisteredCount,
+		}, nil
+	}
+
+	result, err := r.RecoverFiles(ctx, orphanedFiles, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalFiles = len(files)
+	result.SkippedCount += alreadyRegisteredCount
+
+	return result, nil
+}
+
 // ListFiles scans storage and returns all parquet files found.
 func (r *Reconciler) ListFiles(ctx context.Context, opts RecoveryOptions) ([]DataFile, error) {
 	var files []DataFile
@@ -74,7 +148,6 @@ func (r *Reconciler) ListFiles(ctx context.Context, opts RecoveryOptions) ([]Dat
 
 	// Scan storage for files
 	if len(opts.Tables) > 0 {
-		// Scan specific tables
 		for _, table := range opts.Tables {
 			tableFiles, scanErr := r.scanner.ScanTable(ctx, table, scanOpts)
 			if scanErr != nil {
@@ -83,7 +156,6 @@ func (r *Reconciler) ListFiles(ctx context.Context, opts RecoveryOptions) ([]Dat
 			files = append(files, tableFiles...)
 		}
 	} else {
-		// Scan all tables
 		files, err = r.scanner.ScanAll(ctx, scanOpts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan storage: %w", err)
@@ -93,8 +165,23 @@ func (r *Reconciler) ListFiles(ctx context.Context, opts RecoveryOptions) ([]Dat
 	return files, nil
 }
 
+// extractTableNames extracts unique table names from a list of data files.
+func extractTableNames(files []DataFile) []string {
+	tableSet := make(map[string]struct{})
+	for _, f := range files {
+		if f.TableName != "" {
+			tableSet[f.TableName] = struct{}{}
+		}
+	}
+
+	tables := make([]string, 0, len(tableSet))
+	for t := range tableSet {
+		tables = append(tables, t)
+	}
+	return tables
+}
+
 // GetRegisteredFiles returns a set of file URIs that are already registered with the catalog.
-// This is used to filter out already-registered files before attempting recovery.
 func (r *Reconciler) GetRegisteredFiles(ctx context.Context, namespace string, tableNames []string) (map[string]struct{}, error) {
 	registeredFiles := make(map[string]struct{})
 
@@ -127,20 +214,162 @@ func (r *Reconciler) GetRegisteredFiles(ctx context.Context, namespace string, t
 	return registeredFiles, nil
 }
 
-// extractTableNames extracts unique table names from a list of data files.
-func extractTableNames(files []DataFile) []string {
-	tableSet := make(map[string]struct{})
-	for _, f := range files {
-		if f.TableName != "" {
-			tableSet[f.TableName] = struct{}{}
+// RecoverFiles attempts to register orphaned files with the catalog.
+// Files are batched by table (up to maxBatchSize files per batch) to improve performance.
+func (r *Reconciler) RecoverFiles(ctx context.Context, files []DataFile, opts RecoveryOptions) (*RecoveryResult, error) {
+	result := &RecoveryResult{
+		TotalFiles:      len(files),
+		RegisteredFiles: make([]DataFile, 0),
+		Errors:          make([]FileError, 0),
+	}
+
+	if opts.DryRun {
+		r.logger.Info("dry-run mode: would attempt to register files",
+			zap.Int("file_count", len(files)))
+		result.SkippedCount = len(files)
+		return result, nil
+	}
+
+	if r.catalog.GetCatalogType() == "none" {
+		return nil, fmt.Errorf("catalog is not configured (type=none)")
+	}
+
+	filesByTable := groupFilesByTable(files)
+	for tableName, tableFiles := range filesByTable {
+		r.logger.Debug("processing files for table",
+			zap.String("table", tableName),
+			zap.Int("file_count", len(tableFiles)))
+
+		// Process files in batches
+		for i := 0; i < len(tableFiles); i += maxBatchSize {
+			end := i + maxBatchSize
+			if end > len(tableFiles) {
+				end = len(tableFiles)
+			}
+			batch := tableFiles[i:end]
+
+			r.processBatch(ctx, batch, result)
 		}
 	}
 
-	tables := make([]string, 0, len(tableSet))
-	for t := range tableSet {
-		tables = append(tables, t)
+	return result, nil
+}
+
+// groupFilesByTable groups files by their TableName.
+func groupFilesByTable(files []DataFile) map[string][]DataFile {
+	grouped := make(map[string][]DataFile)
+	for _, f := range files {
+		grouped[f.TableName] = append(grouped[f.TableName], f)
 	}
-	return tables
+	return grouped
+}
+
+// processBatch attempts to register a batch of files (all from the same table) with the catalog.
+// On failure, it gradually reduces the batch size before falling back to individual file processing.
+func (r *Reconciler) processBatch(ctx context.Context, files []DataFile, result *RecoveryResult) {
+	r.processBatchWithSize(ctx, files, maxBatchSize, result)
+}
+
+// processBatchWithSize attempts to register files in batches of the specified size.
+// On failure, it reduces the batch size by batchSizeDivisor (e.g., 1000 -> 100 -> 10 -> 1).
+// When batch size reaches 1, it falls back to individual file processing.
+func (r *Reconciler) processBatchWithSize(ctx context.Context, files []DataFile, batchSize int, result *RecoveryResult) {
+	if len(files) == 0 {
+		return
+	}
+
+	// If batch size is 1 or less, process files individually
+	if batchSize <= 1 {
+		for _, file := range files {
+			r.processFileIndividually(ctx, file, result)
+		}
+		return
+	}
+
+	// Process files in batches of the current size
+	for i := 0; i < len(files); i += batchSize {
+		end := i + batchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		batch := files[i:end]
+
+		appendOpts := make([]iceberg.AppendOptions, 0, len(batch))
+		for _, file := range batch {
+			appendOpts = append(appendOpts, iceberg.AppendOptions{
+				Namespace:       r.namespace,
+				Table:           file.TableName,
+				FilePath:        file.URI,
+				FileSizeBytes:   file.Size,
+				RecordCount:     file.RecordCount,
+				PartitionValues: file.PartitionValues,
+			})
+		}
+
+		err := r.catalog.AppendDataFiles(ctx, appendOpts)
+		if err == nil {
+			// All files in the batch succeeded
+			result.SuccessCount += len(batch)
+			result.RegisteredFiles = append(result.RegisteredFiles, batch...)
+			r.logger.Debug("batch registration succeeded",
+				zap.String("table", batch[0].TableName),
+				zap.Int("file_count", len(batch)),
+				zap.Int("batch_size", batchSize))
+			continue
+		}
+
+		// Batch failed - reduce batch size and retry
+		// Use the smaller of batchSize and actual file count as the base for reduction
+		// This avoids unnecessary retries when file count is small (e.g., 3 files: 3 -> 1, not 1000 -> 100 -> 10 -> 1)
+		effectiveSize := batchSize
+		if len(batch) < effectiveSize {
+			effectiveSize = len(batch)
+		}
+		nextBatchSize := effectiveSize / batchSizeDivisor
+		if nextBatchSize < 1 {
+			nextBatchSize = 1
+		}
+
+		r.logger.Debug("batch registration failed, reducing batch size",
+			zap.String("table", batch[0].TableName),
+			zap.Int("file_count", len(batch)),
+			zap.Int("effective_size", effectiveSize),
+			zap.Int("next_batch_size", nextBatchSize),
+			zap.Error(err))
+
+		// Recursively process the failed batch with smaller batch size
+		r.processBatchWithSize(ctx, batch, nextBatchSize, result)
+	}
+}
+
+// processFileIndividually attempts to register a single file with the catalog.
+func (r *Reconciler) processFileIndividually(ctx context.Context, file DataFile, result *RecoveryResult) {
+	appendOpts := []iceberg.AppendOptions{{
+		Namespace:       r.namespace,
+		Table:           file.TableName,
+		FilePath:        file.URI,
+		FileSizeBytes:   file.Size,
+		RecordCount:     file.RecordCount,
+		PartitionValues: file.PartitionValues,
+	}}
+
+	err := r.catalog.AppendDataFiles(ctx, appendOpts)
+	if err == nil {
+		result.SuccessCount++
+		result.RegisteredFiles = append(result.RegisteredFiles, file)
+		return
+	}
+
+	if IsCrossPartitionError(err) {
+		r.handleCrossPartitionFile(ctx, file, err, result)
+		return
+	}
+
+	result.FailureCount++
+	result.Errors = append(result.Errors, FileError{
+		File:  file,
+		Error: err.Error(),
+	})
 }
 
 // handleCrossPartitionFile handles re-partitioning and registration of files that span multiple partitions.
@@ -213,122 +442,4 @@ func (r *Reconciler) handleCrossPartitionFile(ctx context.Context, file DataFile
 		r.logger.Info("deleted original file after successful repartition",
 			zap.String("path", file.Path))
 	}
-}
-
-// RecoverFiles attempts to register orphaned files with the catalog.
-// Files should be pre-filtered to exclude already-registered files.
-func (r *Reconciler) RecoverFiles(ctx context.Context, files []DataFile, opts RecoveryOptions) (*RecoveryResult, error) {
-	result := &RecoveryResult{
-		TotalFiles:      len(files),
-		RegisteredFiles: make([]DataFile, 0),
-		Errors:          make([]FileError, 0),
-	}
-
-	if opts.DryRun {
-		r.logger.Info("dry-run mode: would attempt to register files",
-			zap.Int("file_count", len(files)))
-		result.SkippedCount = len(files)
-		return result, nil
-	}
-
-	if r.catalog.GetCatalogType() == "none" {
-		return nil, fmt.Errorf("catalog is not configured (type=none)")
-	}
-
-	for _, file := range files {
-		appendOpts := []iceberg.AppendOptions{{
-			Namespace:       r.namespace,
-			Table:           file.TableName,
-			FilePath:        file.URI,
-			FileSizeBytes:   file.Size,
-			RecordCount:     file.RecordCount,
-			PartitionValues: file.PartitionValues,
-		}}
-
-		err := r.catalog.AppendDataFiles(ctx, appendOpts)
-		if err == nil {
-			result.SuccessCount++
-			result.RegisteredFiles = append(result.RegisteredFiles, file)
-			continue
-		}
-
-		if IsCrossPartitionError(err) {
-			r.handleCrossPartitionFile(ctx, file, err, result)
-			continue
-		}
-
-		result.FailureCount++
-		result.Errors = append(result.Errors, FileError{
-			File:  file,
-			Error: err.Error(),
-		})
-	}
-
-	return result, nil
-}
-
-// Recover performs the full recovery process: scan, find orphans, and register.
-// Queries the catalog manifest to identify already-registered files,
-// then only registers truly orphaned files.
-func (r *Reconciler) Recover(ctx context.Context, opts RecoveryOptions) (*RecoveryResult, error) {
-	r.logger.Info("starting recovery process",
-		zap.String("namespace", r.namespace),
-		zap.Strings("tables", opts.Tables),
-		zap.Bool("dry_run", opts.DryRun))
-
-	// Find files in storage
-	files, err := r.ListFiles(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list files: %w", err)
-	}
-
-	r.logger.Info("found files in storage", zap.Int("count", len(files)))
-
-	if len(files) == 0 {
-		return &RecoveryResult{TotalFiles: 0}, nil
-	}
-
-	// Get already-registered files from the catalog manifest
-	tableNames := extractTableNames(files)
-	registeredFiles, err := r.GetRegisteredFiles(ctx, r.namespace, tableNames)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get registered files: %w", err)
-	}
-
-	r.logger.Info("retrieved registered files from catalog",
-		zap.Int("registered_count", len(registeredFiles)))
-
-	// Filter out already-registered files
-	var orphanedFiles []DataFile
-	var alreadyRegisteredCount int
-	for _, file := range files {
-		if _, exists := registeredFiles[file.URI]; exists {
-			alreadyRegisteredCount++
-		} else {
-			orphanedFiles = append(orphanedFiles, file)
-		}
-	}
-
-	r.logger.Info("identified orphaned files",
-		zap.Int("total_files", len(files)),
-		zap.Int("already_registered", alreadyRegisteredCount),
-		zap.Int("orphaned", len(orphanedFiles)))
-
-	if len(orphanedFiles) == 0 {
-		return &RecoveryResult{
-			TotalFiles:   len(files),
-			SkippedCount: alreadyRegisteredCount,
-		}, nil
-	}
-
-	// Recover only the orphaned files
-	result, err := r.RecoverFiles(ctx, orphanedFiles, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalFiles = len(files)
-	result.SkippedCount += alreadyRegisteredCount
-
-	return result, nil
 }

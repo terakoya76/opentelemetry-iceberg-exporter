@@ -40,7 +40,10 @@ graph LR
 ├── exporter.go             # Main exporter logic
 ├── factory.go              # OTel factory functions
 ├── writer.go               # Write orchestration
-├── path.go                 # Partition path generation
+├── cmd/
+│   └── recovery/           # Recovery CLI tool
+│       ├── main.go         # CLI entry point
+│       └── README.md       # Recovery tool documentation
 ├── internal/
 │   ├── arrow/              # OTEL → Arrow/Parquet conversion
 │   │   ├── traces.go       # Traces converter
@@ -48,7 +51,10 @@ graph LR
 │   │   ├── metrics.go      # Metrics converter (5 types)
 │   │   ├── schema.go       # Arrow schema definitions
 │   │   ├── parquet.go      # Parquet writer utilities
+│   │   ├── partition.go    # Partition path generation for Arrow
 │   │   └── attributes.go   # Attribute conversion helpers
+│   ├── constants/          # Shared constants
+│   │   └── constants.go    # Exporter name, granularity constants
 │   ├── iceberg/            # Iceberg abstractions
 │   │   ├── catalog.go      # Catalog interface & config
 │   │   ├── catalog_rest.go # REST Catalog implementation
@@ -59,9 +65,16 @@ graph LR
 │   │   ├── fileio_r2.go    # R2 FileIO implementation
 │   │   ├── fileio_local.go # Local filesystem implementation
 │   │   ├── fileio_factory.go # FileIO factory
+│   │   ├── auth.go         # Authentication handling
+│   │   ├── partition.go    # Partition path generation
 │   │   └── http.go         # HTTP utilities for catalog communication
-│   └── logger/             # Logging utilities
-│       └── logger.go       # Verbosity-based logging wrapper
+│   ├── logger/             # Logging utilities
+│   │   └── logger.go       # Verbosity-based logging wrapper
+│   └── recovery/           # Recovery tool logic
+│       ├── scanner.go      # Storage scanner for orphaned files
+│       ├── reconciler.go   # Catalog reconciliation
+│       ├── repartitioner.go # Re-segment data across partitions
+│       └── types.go        # Recovery types and options
 ├── example/
 │   ├── otel-config.yaml    # Example collector configuration
 │   └── docker-compose.yaml # Local development setup (MinIO + Nessie)

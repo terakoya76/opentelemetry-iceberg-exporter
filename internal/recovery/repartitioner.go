@@ -59,6 +59,7 @@ func NewRepartitioner(
 type RepartitionedFile struct {
 	// DataFile is the new file's metadata
 	DataFile DataFile
+
 	// OriginalPath is the path of the original file that was re-partitioned
 	OriginalPath string
 }
