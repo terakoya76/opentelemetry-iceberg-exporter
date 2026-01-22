@@ -272,7 +272,6 @@ func TestSplitByPartition_WithTimezone(t *testing.T) {
 
 	// The partition timestamp should be 09:00 JST
 	expectedTime := time.Date(2026, 1, 12, 9, 0, 0, 0, jst)
-	// Note: time.LoadLocation("Asia/Tokyo") will return JST
 	loc, _ := time.LoadLocation("Asia/Tokyo")
 	assert.Equal(t, expectedTime.In(loc).Hour(), result[0].Timestamp.Hour())
 }

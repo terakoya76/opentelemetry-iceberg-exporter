@@ -74,9 +74,9 @@ func TestTracesSchema(t *testing.T) {
 			assert.True(t, ok, "Field %s should be a list type", expected.name)
 		}
 
-		// Verify Parquet field_id metadata
+		// Verify NO Parquet field_id metadata (iceberg-go will use name mapping)
 		fieldIdIdx := field.Metadata.FindKey("PARQUET:field_id")
-		assert.GreaterOrEqual(t, fieldIdIdx, 0, "Field %s should have PARQUET:field_id metadata", expected.name)
+		assert.Equal(t, -1, fieldIdIdx, "Field %s should NOT have PARQUET:field_id metadata", expected.name)
 	}
 }
 
@@ -125,9 +125,9 @@ func TestLogsSchema(t *testing.T) {
 		assert.Equal(t, expected.name, field.Name, "Field %d should be %s", i, expected.name)
 		assert.Equal(t, expected.nullable, field.Nullable, "Field %s nullable should be %v", expected.name, expected.nullable)
 
-		// Verify Parquet field_id metadata
+		// Verify NO Parquet field_id metadata (iceberg-go will use name mapping)
 		fieldIdIdx := field.Metadata.FindKey("PARQUET:field_id")
-		assert.GreaterOrEqual(t, fieldIdIdx, 0, "Field %s should have PARQUET:field_id metadata", expected.name)
+		assert.Equal(t, -1, fieldIdIdx, "Field %s should NOT have PARQUET:field_id metadata", expected.name)
 	}
 }
 
@@ -174,9 +174,9 @@ func TestMetricSchemas(t *testing.T) {
 				require.NotEmpty(t, indices, "Field %s should exist in %s schema", fieldName, tc.name)
 
 				field := tc.schema.Field(indices[0])
-				// Verify Parquet field_id metadata
+				// Verify NO Parquet field_id metadata (iceberg-go will use name mapping)
 				fieldIdIdx := field.Metadata.FindKey("PARQUET:field_id")
-				assert.GreaterOrEqual(t, fieldIdIdx, 0, "Field %s should have PARQUET:field_id metadata", fieldName)
+				assert.Equal(t, -1, fieldIdIdx, "Field %s should NOT have PARQUET:field_id metadata", fieldName)
 			}
 		})
 	}
@@ -185,9 +185,9 @@ func TestMetricSchemas(t *testing.T) {
 func TestBuildSchema(t *testing.T) {
 	t.Run("basic fields", func(t *testing.T) {
 		defs := []FieldDef{
-			{"field1", arrow.BinaryTypes.String, false, 1},
-			{"field2", arrow.PrimitiveTypes.Int64, true, 2},
-			{"field3", arrow.ListOf(arrow.BinaryTypes.String), true, 3},
+			{"field1", arrow.BinaryTypes.String, false},
+			{"field2", arrow.PrimitiveTypes.Int64, true},
+			{"field3", arrow.ListOf(arrow.BinaryTypes.String), true},
 		}
 
 		metadata := arrow.NewMetadata(
@@ -205,23 +205,28 @@ func TestBuildSchema(t *testing.T) {
 		assert.GreaterOrEqual(t, idx, 0)
 		assert.Equal(t, "1.0.0", schemaMetadata.Values()[idx])
 
-		// Verify each field
+		// Verify each field has correct name and nullable, but NO field IDs
+		// (iceberg-go will assign field IDs via name mapping when writing)
 		for i, def := range defs {
 			field := schema.Field(i)
 			assert.Equal(t, def.Name, field.Name)
-			assert.Equal(t, def.Type, field.Type)
 			assert.Equal(t, def.Nullable, field.Nullable)
 
-			// Verify field ID metadata
+			// Verify NO field ID metadata
 			fieldIDIdx := field.Metadata.FindKey("PARQUET:field_id")
-			require.GreaterOrEqual(t, fieldIDIdx, 0, "Field %s should have PARQUET:field_id metadata", def.Name)
-			assert.Equal(t, itoa(def.FieldID), field.Metadata.Values()[fieldIDIdx])
+			assert.Equal(t, -1, fieldIDIdx, "Field %s should NOT have PARQUET:field_id metadata", def.Name)
 		}
+
+		// Verify list element also has NO field ID
+		listField := schema.Field(2)
+		listType := listField.Type.(*arrow.ListType)
+		elemFieldIDIdx := listType.ElemField().Metadata.FindKey("PARQUET:field_id")
+		assert.Equal(t, -1, elemFieldIDIdx, "List element should NOT have PARQUET:field_id metadata")
 	})
 
 	t.Run("with nil metadata", func(t *testing.T) {
 		defs := []FieldDef{
-			{"test_field", arrow.BinaryTypes.String, false, 1},
+			{"test_field", arrow.BinaryTypes.String, false},
 		}
 
 		schema := buildSchema(defs, nil)
@@ -233,10 +238,9 @@ func TestBuildSchema(t *testing.T) {
 		field := schema.Field(0)
 		assert.Equal(t, "test_field", field.Name)
 
-		// Field should still have its field ID metadata
+		// Field should NOT have field ID metadata
 		fieldIDIdx := field.Metadata.FindKey("PARQUET:field_id")
-		require.GreaterOrEqual(t, fieldIDIdx, 0)
-		assert.Equal(t, "1", field.Metadata.Values()[fieldIDIdx])
+		assert.Equal(t, -1, fieldIDIdx, "Field should NOT have PARQUET:field_id metadata")
 	})
 
 	t.Run("empty definitions", func(t *testing.T) {
@@ -248,7 +252,7 @@ func TestBuildSchema(t *testing.T) {
 		assert.Equal(t, 0, schema.NumFields())
 	})
 
-	t.Run("field IDs are unique", func(t *testing.T) {
+	t.Run("field names are unique", func(t *testing.T) {
 		testCases := []struct {
 			name   string
 			schema *arrow.Schema
@@ -264,22 +268,20 @@ func TestBuildSchema(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				fieldIDs := make(map[string]bool)
+				fieldNames := make(map[string]bool)
 
 				for i := 0; i < tc.schema.NumFields(); i++ {
 					field := tc.schema.Field(i)
-					idx := field.Metadata.FindKey("PARQUET:field_id")
-					require.GreaterOrEqual(t, idx, 0, "Field %s should have PARQUET:field_id", field.Name)
-
-					fieldID := field.Metadata.Values()[idx]
-					assert.False(t, fieldIDs[fieldID], "Field ID %s is duplicated in %s (field: %s)", fieldID, tc.name, field.Name)
-					fieldIDs[fieldID] = true
+					assert.False(t, fieldNames[field.Name], "Field name %s is duplicated in %s", field.Name, tc.name)
+					fieldNames[field.Name] = true
 				}
 			})
 		}
 	})
 
-	t.Run("field IDs are sequential", func(t *testing.T) {
+	t.Run("no field IDs assigned", func(t *testing.T) {
+		// Verify that no field IDs are assigned in the Arrow schema.
+		// iceberg-go will use name mapping to assign field IDs when writing to the table.
 		testCases := []struct {
 			name   string
 			schema *arrow.Schema
@@ -297,40 +299,12 @@ func TestBuildSchema(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				for i := 0; i < tc.schema.NumFields(); i++ {
 					field := tc.schema.Field(i)
-					idx := field.Metadata.FindKey("PARQUET:field_id")
-					require.GreaterOrEqual(t, idx, 0)
-
-					fieldID := field.Metadata.Values()[idx]
-					expectedID := itoa(i + 1) // Field IDs are 1-based
-					assert.Equal(t, expectedID, fieldID, "Field %s at index %d should have field_id %s, got %s", field.Name, i, expectedID, fieldID)
+					fieldIDIdx := field.Metadata.FindKey("PARQUET:field_id")
+					assert.Equal(t, -1, fieldIDIdx, "Field %s should NOT have PARQUET:field_id", field.Name)
 				}
 			})
 		}
 	})
-}
-
-func TestItoa(t *testing.T) {
-	testCases := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{123, "123"},
-		{1000, "1000"},
-		{-1, "-1"},
-		{-42, "-42"},
-		{-1000, "-1000"},
-		{2147483647, "2147483647"},   // Max int32
-		{-2147483648, "-2147483648"}, // Min int32
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.expected, func(t *testing.T) {
-			assert.Equal(t, tc.expected, itoa(tc.input))
-		})
-	}
 }
 
 func TestTracesSchema_FieldTypes(t *testing.T) {

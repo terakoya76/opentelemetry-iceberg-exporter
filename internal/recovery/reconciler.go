@@ -116,10 +116,14 @@ func (r *Reconciler) Recover(ctx context.Context, opts RecoveryOptions) (*Recove
 		}
 	}
 
+	// Files in catalog but not found in storage (e.g., removed by compaction/expire_snapshots)
+	catalogOnlyCount := len(registeredFiles) - alreadyRegisteredCount
+
 	r.logger.Info("identified orphaned files",
 		zap.Int("total_files", len(files)),
 		zap.Int("already_registered", alreadyRegisteredCount),
-		zap.Int("orphaned", len(orphanedFiles)))
+		zap.Int("orphaned", len(orphanedFiles)),
+		zap.Int("catalog_only", catalogOnlyCount))
 
 	if len(orphanedFiles) == 0 {
 		return &RecoveryResult{

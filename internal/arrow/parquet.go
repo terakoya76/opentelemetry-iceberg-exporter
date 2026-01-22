@@ -2,10 +2,8 @@ package arrow
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -13,8 +11,6 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/klauspost/compress/snappy"
-	"github.com/klauspost/compress/zstd"
 )
 
 // ParquetWriterOptions holds options for writing Parquet files.
@@ -200,81 +196,4 @@ func WriteParquet(record arrow.RecordBatch, opts ParquetWriterOptions) ([]byte, 
 	}
 
 	return buf.Bytes(), nil
-}
-
-// CompressData compresses data using the specified algorithm.
-func CompressData(data []byte, compression string) ([]byte, error) {
-	switch compression {
-	case "gzip":
-		return compressGzip(data)
-	case "zstd":
-		return compressZstd(data)
-	case "snappy":
-		return compressSnappy(data)
-	case "none", "":
-		return data, nil
-	default:
-		return data, nil
-	}
-}
-
-func compressGzip(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	writer := gzip.NewWriter(&buf)
-	if _, err := writer.Write(data); err != nil {
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func compressZstd(data []byte) ([]byte, error) {
-	encoder, err := zstd.NewWriter(nil)
-	if err != nil {
-		return nil, err
-	}
-	return encoder.EncodeAll(data, nil), nil
-}
-
-func compressSnappy(data []byte) ([]byte, error) {
-	return snappy.Encode(nil, data), nil
-}
-
-// DecompressData decompresses data using the specified algorithm.
-func DecompressData(data []byte, compression string) ([]byte, error) {
-	switch compression {
-	case "gzip":
-		return decompressGzip(data)
-	case "zstd":
-		return decompressZstd(data)
-	case "snappy":
-		return decompressSnappy(data)
-	case "none", "":
-		return data, nil
-	default:
-		return data, nil
-	}
-}
-
-func decompressGzip(data []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = reader.Close() }()
-	return io.ReadAll(reader)
-}
-
-func decompressZstd(data []byte) ([]byte, error) {
-	decoder, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, err
-	}
-	return decoder.DecodeAll(data, nil)
-}
-
-func decompressSnappy(data []byte) ([]byte, error) {
-	return snappy.Decode(nil, data)
 }

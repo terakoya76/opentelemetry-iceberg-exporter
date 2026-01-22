@@ -26,6 +26,12 @@ const (
 
 	// DefaultCompression is the default compression algorithm.
 	DefaultCompression = "snappy"
+
+	// DefaultTimeout is the default timeout for export operations.
+	// This is longer than the OTEL default (5s) because Iceberg catalog operations
+	// require: LoadTable (REST) + AddFiles (reads Parquet metadata from storage) + Commit (REST).
+	// The AddFiles operation can be slow as it fetches file metadata from S3/R2.
+	DefaultTimeout = 60 * time.Second
 )
 
 // NewFactory creates a new factory for the Iceberg exporter.
@@ -41,7 +47,9 @@ func NewFactory() exporter.Factory {
 
 func createDefaultConfig() component.Config {
 	return &Config{
-		TimeoutConfig: exporterhelper.NewDefaultTimeoutConfig(),
+		TimeoutConfig: exporterhelper.TimeoutConfig{
+			Timeout: DefaultTimeout,
+		},
 		QueueConfig:   configoptional.Default(exporterhelper.NewDefaultQueueConfig()),
 		BackOffConfig: configretry.NewDefaultBackOffConfig(),
 		Verbosity:     configtelemetry.LevelNormal,
@@ -141,6 +149,3 @@ func createLogsExporter(
 		exporterhelper.WithRetry(c.BackOffConfig),
 	)
 }
-
-// Needed for time import in createDefaultConfig
-var _ = time.Second

@@ -5,49 +5,41 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/iceberg-go"
 )
 
 // MockCatalog is a mock implementation of Catalog for testing.
 // It provides configurable error behavior and tracks method calls.
 type MockCatalog struct {
-	catalogType          string
 	appendErr            error
 	appendErrOnce        bool
-	appendErrMinBatch    int // If > 0, only return error when batch size >= this value
-	appendCount          int // Total number of files appended
-	appendCalls          int // Number of times AppendDataFiles was called
+	appendErrMinBatch    int // Minimum batch size to trigger error (0 means always error)
+	appendCount          int // Total number of records appended
+	appendCalls          int // Number of times AppendRecords/AppendDataFiles was called
 	listDataFiles        []string
 	listDataFilesByTable map[string][]string // per-table file lists (table name -> files)
 	listErr              error
-	ensureNsErr          error
-	ensureTableErr       error
 	mu                   sync.Mutex
 }
 
 // NewMockCatalog creates a new MockCatalog instance.
 func NewMockCatalog() *MockCatalog {
-	return &MockCatalog{
-		catalogType: "mock",
-	}
+	return &MockCatalog{}
 }
 
 // GetCatalogType implements Catalog.GetCatalogType.
 func (m *MockCatalog) GetCatalogType() string {
-	return m.catalogType
+	return "mock"
 }
 
 // EnsureNamespace implements Catalog.EnsureNamespace.
 func (m *MockCatalog) EnsureNamespace(_ context.Context, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.ensureNsErr
+	return nil
 }
 
 // EnsureTable implements Catalog.EnsureTable.
 func (m *MockCatalog) EnsureTable(_ context.Context, _, _ string, _ *arrow.Schema, _ PartitionSpec) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.ensureTableErr
+	return nil
 }
 
 // AppendDataFiles implements Catalog.AppendDataFiles.
@@ -61,6 +53,23 @@ func (m *MockCatalog) AppendDataFiles(_ context.Context, opts []AppendOptions) e
 		if m.appendErrMinBatch > 0 && len(opts) < m.appendErrMinBatch {
 			return nil // Success for smaller batches
 		}
+		if m.appendErrOnce {
+			err := m.appendErr
+			m.appendErr = nil
+			return err
+		}
+		return m.appendErr
+	}
+	return nil
+}
+
+// AppendRecords implements Catalog.AppendRecords.
+func (m *MockCatalog) AppendRecords(_ context.Context, _, _ string, record arrow.RecordBatch, _ iceberg.Properties) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendCalls++
+	m.appendCount += int(record.NumRows())
+	if m.appendErr != nil {
 		if m.appendErrOnce {
 			err := m.appendErr
 			m.appendErr = nil
@@ -91,13 +100,6 @@ func (m *MockCatalog) ListDataFiles(_ context.Context, _, table string) ([]strin
 // Close implements Catalog.Close.
 func (m *MockCatalog) Close() error {
 	return nil
-}
-
-// SetCatalogType sets the catalog type returned by GetCatalogType.
-func (m *MockCatalog) SetCatalogType(catalogType string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.catalogType = catalogType
 }
 
 // SetAppendErr sets the error to return from AppendDataFiles.
@@ -146,20 +148,6 @@ func (m *MockCatalog) SetListErr(err error) {
 	m.listErr = err
 }
 
-// SetEnsureNamespaceErr sets the error to return from EnsureNamespace.
-func (m *MockCatalog) SetEnsureNamespaceErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureNsErr = err
-}
-
-// SetEnsureTableErr sets the error to return from EnsureTable.
-func (m *MockCatalog) SetEnsureTableErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureTableErr = err
-}
-
 // GetAppendCalls returns the number of times AppendDataFiles was called.
 func (m *MockCatalog) GetAppendCalls() int {
 	m.mu.Lock()
@@ -172,21 +160,4 @@ func (m *MockCatalog) GetAppendCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.appendCount
-}
-
-// Reset clears all state and resets error configurations.
-func (m *MockCatalog) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.catalogType = "mock"
-	m.appendErr = nil
-	m.appendErrOnce = false
-	m.appendErrMinBatch = 0
-	m.appendCount = 0
-	m.appendCalls = 0
-	m.listDataFiles = nil
-	m.listDataFilesByTable = nil
-	m.listErr = nil
-	m.ensureNsErr = nil
-	m.ensureTableErr = nil
 }

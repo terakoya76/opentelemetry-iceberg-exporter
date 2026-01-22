@@ -5,6 +5,15 @@ import (
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/iceberg-go"
+)
+
+const (
+	// CatalogTypeNone is the catalog type for no-op catalog (direct FileIO writes only).
+	CatalogTypeNone = "none"
+
+	// CatalogTypeRest is the catalog type for REST catalog.
+	CatalogTypeRest = "rest"
 )
 
 // Catalog abstracts Iceberg catalog operations.
@@ -18,6 +27,10 @@ type Catalog interface {
 	// Creates the table if it doesn't exist.
 	// Returns nil if table already exists (does not update schema).
 	EnsureTable(ctx context.Context, namespace, table string, schema *arrow.Schema, partitionSpec PartitionSpec) error
+
+	// AppendRecords appends Arrow records directly to an Iceberg table.
+	// All operations are performed atomically within a transaction.
+	AppendRecords(ctx context.Context, namespace, table string, record arrow.RecordBatch, props iceberg.Properties) error
 
 	// AppendDataFiles registers one or more data files with a table atomically.
 	// All files must belong to the same namespace and table.
@@ -58,8 +71,7 @@ type AppendOptions struct {
 
 // CatalogConfig holds the catalog configuration.
 type CatalogConfig struct {
-	// Type specifies the catalog type: "rest", or "none"
-	// This field is required. Use "none" to explicitly disable catalog registration.
+	// Type specifies the catalog type: CatalogTypeRest ("rest") or CatalogTypeNone ("none")
 	Type string `mapstructure:"type"`
 
 	// Namespace is the default namespace for all tables.
@@ -123,13 +135,13 @@ type TableNamesConfig struct {
 func (c *CatalogConfig) Validate() error {
 	switch c.Type {
 	case "":
-		return fmt.Errorf("catalog.type is required: must be one of \"rest\" or \"none\"")
-	case "none":
+		return fmt.Errorf("catalog.type is required: must be one of %q or %q", CatalogTypeRest, CatalogTypeNone)
+	case CatalogTypeNone:
 		return nil // Explicitly disabled
-	case "rest":
+	case CatalogTypeRest:
 		return c.REST.validate()
 	default:
-		return fmt.Errorf("unknown catalog type: %s (must be one of \"rest\" or \"none\")", c.Type)
+		return fmt.Errorf("unknown catalog type: %s (must be one of %q or %q)", c.Type, CatalogTypeRest, CatalogTypeNone)
 	}
 }
 
@@ -211,5 +223,5 @@ func (c *TableNamesConfig) getMetricsPrefix() string {
 
 // IsEnabled returns true if catalog registration is enabled.
 func (c *CatalogConfig) IsEnabled() bool {
-	return c.Type != "" && c.Type != "none"
+	return c.Type != "" && c.Type != CatalogTypeNone
 }

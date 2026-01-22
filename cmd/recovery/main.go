@@ -129,7 +129,7 @@ Examples:
 	rootCmd.Flags().StringVar(&localBasePath, "local-base-path", "", "Local filesystem base path")
 
 	// Catalog flags
-	rootCmd.Flags().StringVar(&catalogType, "catalog-type", "rest", "Catalog type: rest, none")
+	rootCmd.Flags().StringVar(&catalogType, "catalog-type", iceberg.CatalogTypeRest, "Catalog type: rest, none")
 	rootCmd.Flags().StringVar(&catalogURI, "catalog-uri", "", "REST catalog URI")
 	rootCmd.Flags().StringVar(&catalogToken, "catalog-token", "", "Catalog bearer token")
 	rootCmd.Flags().StringVar(&catalogWarehouse, "catalog-warehouse", "", "Catalog warehouse location")
@@ -329,7 +329,7 @@ func BuildCatalogConfig(params CatalogParams) (iceberg.CatalogConfig, error) {
 	}
 
 	switch params.Type {
-	case "rest":
+	case iceberg.CatalogTypeRest:
 		if params.URI == "" {
 			return cfg, fmt.Errorf("--catalog-uri is required for REST catalog")
 		}
@@ -339,7 +339,7 @@ func BuildCatalogConfig(params CatalogParams) (iceberg.CatalogConfig, error) {
 			Token:     params.Token,
 		}
 
-	case "none":
+	case iceberg.CatalogTypeNone:
 		// No additional config needed
 
 	default:

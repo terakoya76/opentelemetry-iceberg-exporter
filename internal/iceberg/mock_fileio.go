@@ -13,9 +13,6 @@ type MockFileIO struct {
 	files        map[string][]byte
 	deletedPaths []string
 	deleteErr    error
-	writeErr     error
-	readErr      error
-	listErr      error
 }
 
 // NewMockFileIO creates a new MockFileIO instance.
@@ -30,9 +27,6 @@ func NewMockFileIO() *MockFileIO {
 func (m *MockFileIO) Write(_ context.Context, path string, data []byte, _ WriteOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.writeErr != nil {
-		return m.writeErr
-	}
 	m.files[path] = data
 	return nil
 }
@@ -41,9 +35,6 @@ func (m *MockFileIO) Write(_ context.Context, path string, data []byte, _ WriteO
 func (m *MockFileIO) List(_ context.Context, _ string) ([]FileInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.listErr != nil {
-		return nil, m.listErr
-	}
 	var infos []FileInfo
 	for path, data := range m.files {
 		infos = append(infos, FileInfo{
@@ -58,9 +49,6 @@ func (m *MockFileIO) List(_ context.Context, _ string) ([]FileInfo, error) {
 func (m *MockFileIO) Read(_ context.Context, path string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.readErr != nil {
-		return nil, m.readErr
-	}
 	if data, ok := m.files[path]; ok {
 		return data, nil
 	}
@@ -101,27 +89,6 @@ func (m *MockFileIO) SetDeleteErr(err error) {
 	m.deleteErr = err
 }
 
-// SetWriteErr sets the error to return from Write operations.
-func (m *MockFileIO) SetWriteErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.writeErr = err
-}
-
-// SetReadErr sets the error to return from Read operations.
-func (m *MockFileIO) SetReadErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.readErr = err
-}
-
-// SetListErr sets the error to return from List operations.
-func (m *MockFileIO) SetListErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.listErr = err
-}
-
 // GetDeletedPaths returns a copy of the paths that have been deleted.
 func (m *MockFileIO) GetDeletedPaths() []string {
 	m.mu.Lock()
@@ -129,32 +96,9 @@ func (m *MockFileIO) GetDeletedPaths() []string {
 	return append([]string{}, m.deletedPaths...)
 }
 
-// GetFiles returns a copy of all stored files.
-func (m *MockFileIO) GetFiles() map[string][]byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make(map[string][]byte, len(m.files))
-	for k, v := range m.files {
-		result[k] = v
-	}
-	return result
-}
-
 // SetFile sets a file directly in the mock storage.
 func (m *MockFileIO) SetFile(path string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.files[path] = data
-}
-
-// Reset clears all files and resets error states.
-func (m *MockFileIO) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.files = make(map[string][]byte)
-	m.deletedPaths = make([]string, 0)
-	m.deleteErr = nil
-	m.writeErr = nil
-	m.readErr = nil
-	m.listErr = nil
 }

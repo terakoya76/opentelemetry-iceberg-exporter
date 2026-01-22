@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
@@ -238,6 +239,69 @@ func (c *RESTCatalog) EnsureTable(ctx context.Context, namespace, tableName stri
 	return nil
 }
 
+// AppendRecords implements Catalog.AppendRecords.
+func (c *RESTCatalog) AppendRecords(ctx context.Context, namespace, tableName string, record arrow.RecordBatch, props iceberg.Properties) error {
+	if record.NumRows() == 0 {
+		return nil
+	}
+
+	c.logger.Debug("appending records to table",
+		zap.String("namespace", namespace),
+		zap.String("table", tableName),
+		zap.Int64("record_count", record.NumRows()))
+
+	if c.awsConfig != nil {
+		ctx = utils.WithAwsConfig(ctx, c.awsConfig)
+	}
+
+	tableIdent := catalog.ToIdentifier(namespace, tableName)
+
+	// Load table fresh to get the latest state
+	tbl, err := c.catalog.LoadTable(ctx, tableIdent)
+	if err != nil {
+		return fmt.Errorf("failed to load table %s.%s: %w", namespace, tableName, err)
+	}
+
+	// Use the record's own schema for the RecordReader.
+	// - We cannot use the table's Iceberg schema converted back to Arrow because
+	//   ArrowSchemaToIcebergWithFreshIDs assigns fresh field IDs during table creation,
+	//   which differ from the field IDs in the original Arrow schema used to create records.
+	// - The resulting schema mismatch causes "arrow/array: mismatch schema" errors.
+	// - iceberg-go's tbl.Append() handles the actual field ID mapping internally when
+	//   writing Parquet files with proper Iceberg metadata.
+	rdr, err := array.NewRecordReader(record.Schema(), []arrow.RecordBatch{record})
+	if err != nil {
+		return fmt.Errorf("failed to create record reader: %w", err)
+	}
+	defer rdr.Release()
+
+	// Add OTEL metadata to snapshot properties
+	snapshotProps := iceberg.Properties{
+		"otel.exporter":     "iceberg",
+		"otel.record_count": fmt.Sprintf("%d", record.NumRows()),
+	}
+	for k, v := range props {
+		snapshotProps[k] = v
+	}
+
+	// table.Append() handles:
+	// - Automatic partitioning based on table's partition spec
+	// - Parquet file writing to storage
+	// - Catalog metadata registration
+	// All atomically within a transaction
+	_, err = tbl.Append(ctx, rdr, snapshotProps)
+	if err != nil {
+		return fmt.Errorf("failed to append records to table %s.%s: %w", namespace, tableName, err)
+	}
+
+	c.logger.Info("successfully appended records to table",
+		zap.String("namespace", namespace),
+		zap.String("table", tableName),
+		zap.Int64("record_count", record.NumRows()))
+
+	return nil
+}
+
 // AppendDataFiles implements Catalog.AppendDataFiles.
 func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions) error {
 	if len(opts) == 0 {
@@ -246,15 +310,15 @@ func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions)
 
 	// All files must belong to the same namespace and table
 	namespace := opts[0].Namespace
-	table := opts[0].Table
+	tableName := opts[0].Table
 
 	// Collect file paths and calculate totals
 	filePaths := make([]string, 0, len(opts))
 	var totalRecords, totalSize int64
 	for _, opt := range opts {
-		if opt.Namespace != namespace || opt.Table != table {
+		if opt.Namespace != namespace || opt.Table != tableName {
 			return fmt.Errorf("all files must belong to the same namespace and table, got %s.%s and %s.%s",
-				namespace, table, opt.Namespace, opt.Table)
+				namespace, tableName, opt.Namespace, opt.Table)
 		}
 		filePaths = append(filePaths, opt.FilePath)
 		totalRecords += opt.RecordCount
@@ -263,7 +327,7 @@ func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions)
 
 	c.logger.Debug("appending data files to table",
 		zap.String("namespace", namespace),
-		zap.String("table", table),
+		zap.String("table", tableName),
 		zap.Int("file_count", len(filePaths)),
 		zap.Int64("total_records", totalRecords),
 		zap.Int64("total_size", totalSize))
@@ -272,10 +336,10 @@ func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions)
 		ctx = utils.WithAwsConfig(ctx, c.awsConfig)
 	}
 
-	tableIdent := catalog.ToIdentifier(namespace, table)
+	tableIdent := catalog.ToIdentifier(namespace, tableName)
 	tbl, err := c.catalog.LoadTable(ctx, tableIdent)
 	if err != nil {
-		return fmt.Errorf("failed to load table %s.%s: %w", namespace, table, err)
+		return fmt.Errorf("failed to load table %s.%s: %w", namespace, tableName, err)
 	}
 
 	tx := tbl.NewTransaction()
@@ -287,16 +351,16 @@ func (c *RESTCatalog) AppendDataFiles(ctx context.Context, opts []AppendOptions)
 	}
 
 	if err := tx.AddFiles(ctx, filePaths, snapshotProps, false); err != nil {
-		return fmt.Errorf("failed to add files to table %s.%s: %w", namespace, table, err)
+		return fmt.Errorf("failed to add files to table %s.%s: %w", namespace, tableName, err)
 	}
 
 	if _, err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction for table %s.%s: %w", namespace, table, err)
+		return fmt.Errorf("failed to commit transaction for table %s.%s: %w", namespace, tableName, err)
 	}
 
 	c.logger.Info("successfully registered data files",
 		zap.String("namespace", namespace),
-		zap.String("table", table),
+		zap.String("table", tableName),
 		zap.Int("file_count", len(filePaths)))
 
 	return nil
@@ -413,7 +477,7 @@ func (c *RESTCatalog) Close() error {
 
 // GetCatalogType implements Catalog.GetCatalogType.
 func (c *RESTCatalog) GetCatalogType() string {
-	return "rest"
+	return CatalogTypeRest
 }
 
 // arrowSchemaToIcebergSchema converts an Arrow schema to Iceberg schema.

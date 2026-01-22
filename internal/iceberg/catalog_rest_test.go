@@ -14,7 +14,7 @@ import (
 	arrowconv "github.com/terakoya76/opentelemetry-iceberg-exporter/internal/arrow"
 )
 
-func TestArrowSchemaToIcebergSchema(t *testing.T) {
+func Test_arrowSchemaToIcebergSchema(t *testing.T) {
 	t.Run("AllSignalTypes", func(t *testing.T) {
 		tests := []struct {
 			name   string
@@ -106,7 +106,7 @@ func (e mockErrorResponse) Error() string {
 	return e.Type + ": " + e.Message
 }
 
-func TestNormalizeIcebergError(t *testing.T) {
+func Test_normalizeIcebergError(t *testing.T) {
 	tests := []struct {
 		name         string
 		err          error

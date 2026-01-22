@@ -3,8 +3,8 @@ package icebergexporter
 import (
 	"context"
 	"testing"
-	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/config/configtelemetry"
@@ -17,6 +17,7 @@ import (
 func TestNewIcebergWriter(t *testing.T) {
 	ctx := context.Background()
 	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
 
 	t.Run("With filesystem storage and no catalog", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -37,7 +38,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			},
 		}
 
-		writer, err := NewIcebergWriter(ctx, cfg, vlogger)
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
 		require.NoError(t, err)
 		defer func() { _ = writer.Close() }()
 
@@ -62,7 +63,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			Partition: PartitionConfig{},
 		}
 
-		writer, err := NewIcebergWriter(ctx, cfg, vlogger)
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
 		require.NoError(t, err)
 		defer func() { _ = writer.Close() }()
 
@@ -76,7 +77,7 @@ func TestNewIcebergWriter(t *testing.T) {
 			},
 		}
 
-		_, err := NewIcebergWriter(ctx, cfg, vlogger)
+		_, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "storage")
 	})
@@ -85,6 +86,7 @@ func TestNewIcebergWriter(t *testing.T) {
 func TestIcebergWriter_Write(t *testing.T) {
 	ctx := context.Background()
 	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
 	tmpDir := t.TempDir()
 
 	cfg := WriterConfig{
@@ -103,43 +105,14 @@ func TestIcebergWriter_Write(t *testing.T) {
 		},
 	}
 
-	writer, err := NewIcebergWriter(ctx, cfg, vlogger)
+	writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
 	require.NoError(t, err)
 	defer func() { _ = writer.Close() }()
 
-	t.Run("Write traces data", func(t *testing.T) {
+	t.Run("Write with nil record returns nil", func(t *testing.T) {
 		opts := WriteOptions{
-			SignalType:  "traces",
-			Schema:      nil, // Not used when catalog is "none"
-			Data:        []byte("test parquet data"),
-			RecordCount: 10,
-			Timestamp:   time.Date(2024, 6, 15, 14, 30, 0, 0, time.UTC),
-		}
-
-		err := writer.Write(ctx, opts)
-		require.NoError(t, err)
-	})
-
-	t.Run("Write logs data", func(t *testing.T) {
-		opts := WriteOptions{
-			SignalType:  "logs",
-			Schema:      nil,
-			Data:        []byte("test logs data"),
-			RecordCount: 5,
-			Timestamp:   time.Date(2024, 6, 15, 15, 0, 0, 0, time.UTC),
-		}
-
-		err := writer.Write(ctx, opts)
-		require.NoError(t, err)
-	})
-
-	t.Run("Write metrics data", func(t *testing.T) {
-		opts := WriteOptions{
-			SignalType:  "metrics",
-			Schema:      nil,
-			Data:        []byte("test metrics data"),
-			RecordCount: 20,
-			Timestamp:   time.Date(2024, 6, 15, 16, 0, 0, 0, time.UTC),
+			SignalType: "traces",
+			Record:     nil,
 		}
 
 		err := writer.Write(ctx, opts)
@@ -150,6 +123,7 @@ func TestIcebergWriter_Write(t *testing.T) {
 func TestIcebergWriter_Close(t *testing.T) {
 	ctx := context.Background()
 	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
 	tmpDir := t.TempDir()
 
 	cfg := WriterConfig{
@@ -164,7 +138,7 @@ func TestIcebergWriter_Close(t *testing.T) {
 		},
 	}
 
-	writer, err := NewIcebergWriter(ctx, cfg, vlogger)
+	writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
 	require.NoError(t, err)
 
 	// Close should not error
@@ -183,4 +157,163 @@ func TestPartitionConfig(t *testing.T) {
 
 	assert.Equal(t, "daily", cfg.Granularity)
 	assert.Equal(t, "Europe/London", cfg.Timezone)
+}
+
+func TestIcebergWriter_EnsureAllTables(t *testing.T) {
+	ctx := context.Background()
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
+
+	t.Run("With catalog type none - skips table creation", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		cfg := WriterConfig{
+			Storage: iceberg.FileIOConfig{
+				Type: "filesystem",
+				Filesystem: iceberg.LocalFileIOConfig{
+					BasePath: tmpDir,
+				},
+			},
+			Catalog: iceberg.CatalogConfig{
+				Type: "none",
+			},
+			Partition: PartitionConfig{
+				Granularity: "hourly",
+				Timezone:    "UTC",
+			},
+		}
+
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
+		require.NoError(t, err)
+		defer func() { _ = writer.Close() }()
+
+		// Should not error even with nil schemas since catalog is "none"
+		tables := []TableConfig{
+			{SignalType: "traces", Schema: nil},
+			{SignalType: "logs", Schema: nil},
+		}
+
+		err = writer.EnsureAllTables(ctx, tables)
+		assert.NoError(t, err)
+	})
+
+	t.Run("With empty tables list", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		cfg := WriterConfig{
+			Storage: iceberg.FileIOConfig{
+				Type: "filesystem",
+				Filesystem: iceberg.LocalFileIOConfig{
+					BasePath: tmpDir,
+				},
+			},
+			Catalog: iceberg.CatalogConfig{
+				Type: "none",
+			},
+			Partition: PartitionConfig{
+				Granularity: "hourly",
+				Timezone:    "UTC",
+			},
+		}
+
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
+		require.NoError(t, err)
+		defer func() { _ = writer.Close() }()
+
+		err = writer.EnsureAllTables(ctx, []TableConfig{})
+		assert.NoError(t, err)
+	})
+}
+
+func TestIcebergWriter_GetPartitionField(t *testing.T) {
+	ctx := context.Background()
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
+	tmpDir := t.TempDir()
+
+	cfg := WriterConfig{
+		Storage: iceberg.FileIOConfig{
+			Type: "filesystem",
+			Filesystem: iceberg.LocalFileIOConfig{
+				BasePath: tmpDir,
+			},
+		},
+		Catalog: iceberg.CatalogConfig{
+			Type: "none",
+		},
+	}
+
+	writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
+	require.NoError(t, err)
+	defer func() { _ = writer.Close() }()
+
+	tests := []struct {
+		signalType string
+		expected   string
+	}{
+		{"traces", "start_time_unix_nano"},
+		{"logs", "time_unix_nano"},
+		{"metrics_gauge", "time_unix_nano"},
+		{"metrics_sum", "time_unix_nano"},
+		{"metrics_histogram", "time_unix_nano"},
+		{"metrics_exponential_histogram", "time_unix_nano"},
+		{"metrics_summary", "time_unix_nano"},
+		{"unknown", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.signalType, func(t *testing.T) {
+			result := writer.getPartitionField(tc.signalType)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func TestIcebergWriter_GetCompression(t *testing.T) {
+	ctx := context.Background()
+	vlogger := logger.New(zaptest.NewLogger(t), configtelemetry.LevelNormal)
+	allocator := memory.NewGoAllocator()
+	tmpDir := t.TempDir()
+
+	t.Run("Filesystem compression", func(t *testing.T) {
+		cfg := WriterConfig{
+			Storage: iceberg.FileIOConfig{
+				Type: "filesystem",
+				Filesystem: iceberg.LocalFileIOConfig{
+					BasePath:    tmpDir,
+					Compression: "zstd",
+				},
+			},
+			Catalog: iceberg.CatalogConfig{
+				Type: "none",
+			},
+		}
+
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
+		require.NoError(t, err)
+		defer func() { _ = writer.Close() }()
+
+		assert.Equal(t, "zstd", writer.getCompression())
+	})
+
+	t.Run("Default compression", func(t *testing.T) {
+		cfg := WriterConfig{
+			Storage: iceberg.FileIOConfig{
+				Type: "filesystem",
+				Filesystem: iceberg.LocalFileIOConfig{
+					BasePath: tmpDir,
+				},
+			},
+			Catalog: iceberg.CatalogConfig{
+				Type: "none",
+			},
+		}
+
+		writer, err := NewIcebergWriter(ctx, cfg, allocator, vlogger)
+		require.NoError(t, err)
+		defer func() { _ = writer.Close() }()
+
+		// Default should be snappy
+		assert.Equal(t, "snappy", writer.getCompression())
+	})
 }

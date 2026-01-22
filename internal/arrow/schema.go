@@ -213,21 +213,20 @@ const (
 // =============================================================================
 
 // FieldDef defines a field with all attributes needed for schema generation.
-// This enables defining fields once and generating schemas with or without field IDs.
 type FieldDef struct {
 	Name     string
 	Type     arrow.DataType
 	Nullable bool
-	FieldID  int
 }
 
 // convertTypeForIceberg converts Arrow types to Iceberg-compatible types.
-// Iceberg does not support unsigned integers, so we convert:
+// This function does NOT assign field IDs - iceberg-go will use the table's
+// name mapping to assign correct field IDs based on field names.
+//
+// Type conversions (Iceberg does not support unsigned integers):
 // - Uint8, Uint16 → Int32 (safe, values fit within signed 32-bit range)
 // - Uint32 → Int64 (safe, values fit within signed 64-bit range)
 // - Uint64 → Int64 (may overflow for values > 2^63-1, but this is standard practice)
-//
-// This function recursively handles nested types (List, Map, Struct).
 func convertTypeForIceberg(dt arrow.DataType) arrow.DataType {
 	switch dt.ID() {
 	// Unsigned integer types → signed integer types
@@ -236,58 +235,50 @@ func convertTypeForIceberg(dt arrow.DataType) arrow.DataType {
 	case arrow.UINT32, arrow.UINT64:
 		return arrow.PrimitiveTypes.Int64
 
-	// Handle nested types recursively
+	// Handle list types - recursively convert element type
 	case arrow.LIST:
 		listType := dt.(*arrow.ListType)
 		convertedElem := convertTypeForIceberg(listType.Elem())
-		if convertedElem == listType.Elem() {
-			return dt // No change needed
-		}
-		return arrow.ListOf(convertedElem)
+		return arrow.ListOfField(arrow.Field{
+			Name:     "element",
+			Type:     convertedElem,
+			Nullable: true,
+		})
 
 	case arrow.LARGE_LIST:
 		listType := dt.(*arrow.LargeListType)
 		convertedElem := convertTypeForIceberg(listType.Elem())
-		if convertedElem == listType.Elem() {
-			return dt
-		}
-		return arrow.LargeListOf(convertedElem)
+		return arrow.LargeListOfField(arrow.Field{
+			Name:     "element",
+			Type:     convertedElem,
+			Nullable: true,
+		})
 
 	case arrow.FIXED_SIZE_LIST:
 		listType := dt.(*arrow.FixedSizeListType)
 		convertedElem := convertTypeForIceberg(listType.Elem())
-		if convertedElem == listType.Elem() {
-			return dt
-		}
-		return arrow.FixedSizeListOf(listType.Len(), convertedElem)
+		return arrow.FixedSizeListOfField(listType.Len(), arrow.Field{
+			Name:     "element",
+			Type:     convertedElem,
+			Nullable: true,
+		})
 
 	case arrow.MAP:
 		mapType := dt.(*arrow.MapType)
 		convertedKey := convertTypeForIceberg(mapType.KeyType())
 		convertedValue := convertTypeForIceberg(mapType.ItemType())
-		if convertedKey == mapType.KeyType() && convertedValue == mapType.ItemType() {
-			return dt
-		}
 		return arrow.MapOf(convertedKey, convertedValue)
 
 	case arrow.STRUCT:
 		structType := dt.(*arrow.StructType)
 		fields := make([]arrow.Field, len(structType.Fields()))
-		changed := false
 		for i, f := range structType.Fields() {
 			convertedType := convertTypeForIceberg(f.Type)
-			if convertedType != f.Type {
-				changed = true
-			}
 			fields[i] = arrow.Field{
 				Name:     f.Name,
 				Type:     convertedType,
 				Nullable: f.Nullable,
-				Metadata: f.Metadata,
 			}
-		}
-		if !changed {
-			return dt
 		}
 		return arrow.StructOf(fields...)
 
@@ -298,101 +289,82 @@ func convertTypeForIceberg(dt arrow.DataType) arrow.DataType {
 }
 
 // buildSchema converts field definitions to an Arrow schema.
+// This function does NOT assign field IDs to the Arrow schema.
+// iceberg-go will use the table's name mapping to assign correct field IDs
+// based on field names when writing to the table.
+//
+// This approach ensures compatibility with existing Iceberg tables regardless
+// of their field ID assignments, matching the behavior of addDataFiles.
 func buildSchema(defs []FieldDef, metadata *arrow.Metadata) *arrow.Schema {
 	fields := make([]arrow.Field, len(defs))
 	for i, def := range defs {
+		convertedType := convertTypeForIceberg(def.Type)
 		fields[i] = arrow.Field{
 			Name:     def.Name,
-			Type:     convertTypeForIceberg(def.Type),
+			Type:     convertedType,
 			Nullable: def.Nullable,
-			Metadata: arrow.NewMetadata(
-				[]string{"PARQUET:field_id"},
-				[]string{itoa(def.FieldID)},
-			),
 		}
 	}
 	return arrow.NewSchema(fields, metadata)
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	n := len(buf)
-	negative := i < 0
-	if negative {
-		i = -i
-	}
-	for i > 0 {
-		n--
-		buf[n] = byte('0' + i%10)
-		i /= 10
-	}
-	if negative {
-		n--
-		buf[n] = '-'
-	}
-	return string(buf[n:])
 }
 
 // =============================================================================
 // Traces Schema
 // =============================================================================
 
-// TracesSchema returns the Arrow schema for OTLP traces WITH field IDs.
+// TracesSchema returns the Arrow schema for OTLP traces with auto-assigned field IDs.
 func TracesSchema() *arrow.Schema {
 	// Use microsecond precision for Iceberg v1/v2 compatibility
 	ts := arrow.FixedWidthTypes.Timestamp_us
 
 	// the field definitions for OTLP traces.
 	tracesFieldDefs := []FieldDef{
-		// Span fields in proto order (IDs 1-16)
-		{FieldTraceTraceId, arrow.BinaryTypes.String, false, 1},
-		{FieldTraceSpanId, arrow.BinaryTypes.String, false, 2},
-		{FieldTraceTraceState, arrow.BinaryTypes.String, true, 3},
-		{FieldTraceParentSpanId, arrow.BinaryTypes.String, true, 4},
-		{FieldTraceSpanFlags, arrow.PrimitiveTypes.Uint32, false, 5},
-		{FieldTraceSpanName, arrow.BinaryTypes.String, false, 6},
-		{FieldTraceSpanKind, arrow.BinaryTypes.String, false, 7},
-		{FieldTraceStartTimeUnixNano, ts, false, 8},
-		{FieldTraceEndTimeUnixNano, ts, false, 9},
-		{FieldTraceSpanAttributes, arrow.BinaryTypes.String, false, 10}, // JSON encoded
-		{FieldTraceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 11},
+		// Span fields in proto order
+		{FieldTraceTraceId, arrow.BinaryTypes.String, false},
+		{FieldTraceSpanId, arrow.BinaryTypes.String, false},
+		{FieldTraceTraceState, arrow.BinaryTypes.String, true},
+		{FieldTraceParentSpanId, arrow.BinaryTypes.String, true},
+		{FieldTraceSpanFlags, arrow.PrimitiveTypes.Uint32, false},
+		{FieldTraceSpanName, arrow.BinaryTypes.String, false},
+		{FieldTraceSpanKind, arrow.BinaryTypes.String, false},
+		{FieldTraceStartTimeUnixNano, ts, false},
+		{FieldTraceEndTimeUnixNano, ts, false},
+		{FieldTraceSpanAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldTraceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Span.events - as lists
-		{FieldTraceEventsTimeUnixNano, arrow.ListOf(ts), false, 12},
-		{FieldTraceEventsName, arrow.ListOf(arrow.BinaryTypes.String), false, 13},
-		{FieldTraceEventsAttributes, arrow.ListOf(arrow.BinaryTypes.String), false, 14}, // JSON encoded
-		{FieldTraceEventsDroppedAttributesCount, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false, 15},
-		{FieldTraceDroppedEventsCount, arrow.PrimitiveTypes.Uint32, false, 16},
+		{FieldTraceEventsTimeUnixNano, arrow.ListOf(ts), false},
+		{FieldTraceEventsName, arrow.ListOf(arrow.BinaryTypes.String), false},
+		{FieldTraceEventsAttributes, arrow.ListOf(arrow.BinaryTypes.String), false}, // JSON encoded
+		{FieldTraceEventsDroppedAttributesCount, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false},
+		{FieldTraceDroppedEventsCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Span.links - as lists
-		{FieldTraceLinksTraceId, arrow.ListOf(arrow.BinaryTypes.String), false, 17},
-		{FieldTraceLinksSpanId, arrow.ListOf(arrow.BinaryTypes.String), false, 18},
-		{FieldTraceLinksTraceState, arrow.ListOf(arrow.BinaryTypes.String), false, 19},
-		{FieldTraceLinksAttributes, arrow.ListOf(arrow.BinaryTypes.String), false, 20}, // JSON encoded
-		{FieldTraceLinksDroppedAttributesCount, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false, 21},
-		{FieldTraceLinksFlags, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false, 22},
-		{FieldTraceDroppedLinksCount, arrow.PrimitiveTypes.Uint32, false, 23},
+		{FieldTraceLinksTraceId, arrow.ListOf(arrow.BinaryTypes.String), false},
+		{FieldTraceLinksSpanId, arrow.ListOf(arrow.BinaryTypes.String), false},
+		{FieldTraceLinksTraceState, arrow.ListOf(arrow.BinaryTypes.String), false},
+		{FieldTraceLinksAttributes, arrow.ListOf(arrow.BinaryTypes.String), false}, // JSON encoded
+		{FieldTraceLinksDroppedAttributesCount, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false},
+		{FieldTraceLinksFlags, arrow.ListOf(arrow.PrimitiveTypes.Uint32), false},
+		{FieldTraceDroppedLinksCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Span.status
-		{FieldTraceStatusCode, arrow.BinaryTypes.String, true, 24},
-		{FieldTraceStatusMessage, arrow.BinaryTypes.String, true, 25},
+		{FieldTraceStatusCode, arrow.BinaryTypes.String, true},
+		{FieldTraceStatusMessage, arrow.BinaryTypes.String, true},
 
 		// Calculated field (not in proto)
-		{FieldTraceDuration, arrow.PrimitiveTypes.Int64, false, 26},
+		{FieldTraceDuration, arrow.PrimitiveTypes.Int64, false},
 
 		// Resource fields (from ResourceSpans wrapper)
-		{FieldServiceName, arrow.BinaryTypes.String, true, 27},
-		{FieldResourceAttributes, arrow.BinaryTypes.String, false, 28}, // JSON encoded
-		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 29},
+		{FieldServiceName, arrow.BinaryTypes.String, true},
+		{FieldResourceAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Scope fields (from ScopeSpans wrapper)
-		{FieldScopeName, arrow.BinaryTypes.String, true, 30},
-		{FieldScopeVersion, arrow.BinaryTypes.String, true, 31},
-		{FieldScopeAttributes, arrow.BinaryTypes.String, false, 32}, // JSON encoded
-		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 33},
+		{FieldScopeName, arrow.BinaryTypes.String, true},
+		{FieldScopeVersion, arrow.BinaryTypes.String, true},
+		{FieldScopeAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 	}
 
 	metadata := arrow.NewMetadata(
@@ -406,7 +378,7 @@ func TracesSchema() *arrow.Schema {
 // Logs Schema
 // =============================================================================
 
-// LogsSchema returns the Arrow schema for OTLP logs WITH field IDs.
+// LogsSchema returns the Arrow schema for OTLP logs with auto-assigned field IDs.
 func LogsSchema() *arrow.Schema {
 	// Use microsecond precision for Iceberg v1/v2 compatibility
 	ts := arrow.FixedWidthTypes.Timestamp_us
@@ -414,28 +386,28 @@ func LogsSchema() *arrow.Schema {
 	// the field definitions for OTLP logs.
 	logsFieldDefs := []FieldDef{
 		// LogRecord fields in proto order
-		{FieldLogTimeUnixNano, ts, false, 1},
-		{FieldLogSeverityNumber, arrow.PrimitiveTypes.Int32, false, 2},
-		{FieldLogSeverityText, arrow.BinaryTypes.String, true, 3},
-		{FieldLogBody, arrow.BinaryTypes.String, false, 4},       // JSON encoded
-		{FieldLogAttributes, arrow.BinaryTypes.String, false, 5}, // JSON encoded
-		{FieldLogDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 6},
-		{FieldLogFlags, arrow.PrimitiveTypes.Uint32, false, 7},
-		{FieldLogTraceId, arrow.BinaryTypes.String, true, 8},
-		{FieldLogSpanId, arrow.BinaryTypes.String, true, 9},
-		{FieldLogObservedTimeUnixNano, ts, true, 10},
-		{FieldLogEventName, arrow.BinaryTypes.String, true, 11},
+		{FieldLogTimeUnixNano, ts, false},
+		{FieldLogSeverityNumber, arrow.PrimitiveTypes.Int32, false},
+		{FieldLogSeverityText, arrow.BinaryTypes.String, true},
+		{FieldLogBody, arrow.BinaryTypes.String, false},       // JSON encoded
+		{FieldLogAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldLogDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
+		{FieldLogFlags, arrow.PrimitiveTypes.Uint32, false},
+		{FieldLogTraceId, arrow.BinaryTypes.String, true},
+		{FieldLogSpanId, arrow.BinaryTypes.String, true},
+		{FieldLogObservedTimeUnixNano, ts, true},
+		{FieldLogEventName, arrow.BinaryTypes.String, true},
 
 		// Resource fields (from ResourceLogs wrapper)
-		{FieldServiceName, arrow.BinaryTypes.String, true, 12},
-		{FieldResourceAttributes, arrow.BinaryTypes.String, false, 13}, // JSON encoded
-		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 14},
+		{FieldServiceName, arrow.BinaryTypes.String, true},
+		{FieldResourceAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Scope fields (from ScopeLogs wrapper)
-		{FieldScopeName, arrow.BinaryTypes.String, true, 15},
-		{FieldScopeVersion, arrow.BinaryTypes.String, true, 16},
-		{FieldScopeAttributes, arrow.BinaryTypes.String, false, 17}, // JSON encoded
-		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, 18},
+		{FieldScopeName, arrow.BinaryTypes.String, true},
+		{FieldScopeVersion, arrow.BinaryTypes.String, true},
+		{FieldScopeAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 	}
 	metadata := arrow.NewMetadata(
 		[]string{"iceberg_exporter.logs_schema_version"},
@@ -450,68 +422,67 @@ func LogsSchema() *arrow.Schema {
 
 // commonMetricFields returns the common fields shared by all metric types.
 // These fields are always present regardless of metric type.
-func commonMetricFields(startID int) []FieldDef {
+func commonMetricFields() []FieldDef {
 	// Use microsecond precision for Iceberg v1/v2 compatibility
 	ts := arrow.FixedWidthTypes.Timestamp_us
 
 	return []FieldDef{
 		// Metric timestamp (required)
-		{FieldMetricTimeUnixNano, ts, false, startID},
+		{FieldMetricTimeUnixNano, ts, false},
 
 		// Resource fields
-		{FieldServiceName, arrow.BinaryTypes.String, true, startID + 1},
-		{FieldResourceAttributes, arrow.BinaryTypes.String, false, startID + 2}, // JSON encoded
-		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, startID + 3},
+		{FieldServiceName, arrow.BinaryTypes.String, true},
+		{FieldResourceAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldResourceDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Scope fields
-		{FieldScopeName, arrow.BinaryTypes.String, true, startID + 4},
-		{FieldScopeVersion, arrow.BinaryTypes.String, true, startID + 5},
-		{FieldScopeAttributes, arrow.BinaryTypes.String, false, startID + 6}, // JSON encoded
-		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false, startID + 7},
+		{FieldScopeName, arrow.BinaryTypes.String, true},
+		{FieldScopeVersion, arrow.BinaryTypes.String, true},
+		{FieldScopeAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldScopeDroppedAttributesCount, arrow.PrimitiveTypes.Uint32, false},
 
 		// Metric identity
-		{FieldMetricName, arrow.BinaryTypes.String, false, startID + 8},
-		{FieldMetricDescription, arrow.BinaryTypes.String, true, startID + 9},
-		{FieldMetricUnit, arrow.BinaryTypes.String, true, startID + 10},
-		{FieldMetricMetadata, arrow.BinaryTypes.String, true, startID + 11}, // JSON encoded
+		{FieldMetricName, arrow.BinaryTypes.String, false},
+		{FieldMetricDescription, arrow.BinaryTypes.String, true},
+		{FieldMetricUnit, arrow.BinaryTypes.String, true},
+		{FieldMetricMetadata, arrow.BinaryTypes.String, true}, // JSON encoded
 
 		// Data point common fields
-		{FieldMetricAttributes, arrow.BinaryTypes.String, false, startID + 12}, // JSON encoded
-		{FieldMetricStartTimeUnixNano, ts, true, startID + 13},
-		{FieldMetricFlags, arrow.PrimitiveTypes.Uint32, false, startID + 14},
+		{FieldMetricAttributes, arrow.BinaryTypes.String, false}, // JSON encoded
+		{FieldMetricStartTimeUnixNano, ts, true},
+		{FieldMetricFlags, arrow.PrimitiveTypes.Uint32, false},
 	}
 }
 
 // exemplarFields returns the exemplar fields (shared by gauge, sum, histogram, exp_histogram).
-func exemplarFields(startID int) []FieldDef {
+func exemplarFields() []FieldDef {
 	// Use microsecond precision for Iceberg v1/v2 compatibility
 	ts := arrow.FixedWidthTypes.Timestamp_us
 
 	return []FieldDef{
-		{FieldMetricExemplarsTimeUnixNano, arrow.ListOf(ts), true, startID},
-		{FieldMetricExemplarsAsDouble, arrow.ListOf(arrow.PrimitiveTypes.Float64), true, startID + 1},
-		{FieldMetricExemplarsSpanId, arrow.ListOf(arrow.BinaryTypes.String), true, startID + 2},
-		{FieldMetricExemplarsTraceId, arrow.ListOf(arrow.BinaryTypes.String), true, startID + 3},
-		{FieldMetricExemplarsAsInt, arrow.ListOf(arrow.PrimitiveTypes.Int64), true, startID + 4},
-		{FieldMetricExemplarsFilteredAttributes, arrow.ListOf(arrow.BinaryTypes.String), true, startID + 5}, // JSON encoded
+		{FieldMetricExemplarsTimeUnixNano, arrow.ListOf(ts), true},
+		{FieldMetricExemplarsAsDouble, arrow.ListOf(arrow.PrimitiveTypes.Float64), true},
+		{FieldMetricExemplarsSpanId, arrow.ListOf(arrow.BinaryTypes.String), true},
+		{FieldMetricExemplarsTraceId, arrow.ListOf(arrow.BinaryTypes.String), true},
+		{FieldMetricExemplarsAsInt, arrow.ListOf(arrow.PrimitiveTypes.Int64), true},
+		{FieldMetricExemplarsFilteredAttributes, arrow.ListOf(arrow.BinaryTypes.String), true}, // JSON encoded
 	}
 }
 
-// GaugeSchema returns the Arrow schema for OTLP gauge metrics WITH field IDs.
+// MetricsGaugeSchema returns the Arrow schema for OTLP gauge metrics with auto-assigned field IDs.
 // Gauge metrics represent a single numerical value that can arbitrarily go up and down.
-// Fields: common (15) + value (2) + exemplars (6) = 23 fields
 func MetricsGaugeSchema() *arrow.Schema {
-	fields := commonMetricFields(1)
+	fields := commonMetricFields()
 
 	// Gauge-specific fields: value (one of as_double or as_int)
 	gaugeFields := []FieldDef{
-		{FieldMetricAsDouble, arrow.PrimitiveTypes.Float64, true, 16},
-		{FieldMetricAsInt, arrow.PrimitiveTypes.Int64, true, 17},
+		{FieldMetricAsDouble, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricAsInt, arrow.PrimitiveTypes.Int64, true},
 	}
 	fields = append(fields, gaugeFields...)
 
 	// Exemplars
-	fields = append(fields, exemplarFields(18)...)
+	fields = append(fields, exemplarFields()...)
 
 	metadata := arrow.NewMetadata(
 		[]string{"iceberg_exporter.metrics_gauge_schema_version"},
@@ -520,23 +491,22 @@ func MetricsGaugeSchema() *arrow.Schema {
 	return buildSchema(fields, &metadata)
 }
 
-// SumSchema returns the Arrow schema for OTLP sum (counter) metrics WITH field IDs.
+// MetricsSumSchema returns the Arrow schema for OTLP sum (counter) metrics with auto-assigned field IDs.
 // Sum metrics represent a cumulative or delta sum of values.
-// Fields: common (15) + value (2) + sum-specific (2) + exemplars (6) = 25 fields
 func MetricsSumSchema() *arrow.Schema {
-	fields := commonMetricFields(1)
+	fields := commonMetricFields()
 
 	// Sum-specific fields: value + aggregation semantics
 	sumFields := []FieldDef{
-		{FieldMetricAsDouble, arrow.PrimitiveTypes.Float64, true, 16},
-		{FieldMetricAsInt, arrow.PrimitiveTypes.Int64, true, 17},
-		{FieldMetricIsMonotonic, arrow.FixedWidthTypes.Boolean, false, 18},
-		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false, 19},
+		{FieldMetricAsDouble, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricAsInt, arrow.PrimitiveTypes.Int64, true},
+		{FieldMetricIsMonotonic, arrow.FixedWidthTypes.Boolean, false},
+		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false},
 	}
 	fields = append(fields, sumFields...)
 
 	// Exemplars
-	fields = append(fields, exemplarFields(20)...)
+	fields = append(fields, exemplarFields()...)
 
 	metadata := arrow.NewMetadata(
 		[]string{"iceberg_exporter.metrics_sum_schema_version"},
@@ -545,25 +515,24 @@ func MetricsSumSchema() *arrow.Schema {
 	return buildSchema(fields, &metadata)
 }
 
-// HistogramSchema returns the Arrow schema for OTLP histogram metrics WITH field IDs.
+// MetricsHistogramSchema returns the Arrow schema for OTLP histogram metrics with auto-assigned field IDs.
 // Histogram metrics represent a distribution of values with explicit bucket boundaries.
-// Fields: common (15) + histogram-specific (7, includes agg_temporality) + exemplars (6) = 28 fields
 func MetricsHistogramSchema() *arrow.Schema {
-	fields := commonMetricFields(1)
+	fields := commonMetricFields()
 
 	// Histogram-specific fields
 	histogramFields := []FieldDef{
-		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false, 16},
-		{FieldMetricSum, arrow.PrimitiveTypes.Float64, true, 17},
-		{FieldMetricMin, arrow.PrimitiveTypes.Float64, true, 18},
-		{FieldMetricMax, arrow.PrimitiveTypes.Float64, true, 19},
-		{FieldMetricBucketCounts, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false, 20},
-		{FieldMetricExplicitBounds, arrow.ListOf(arrow.PrimitiveTypes.Float64), false, 21},
-		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false, 22},
+		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false},
+		{FieldMetricSum, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricMin, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricMax, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricBucketCounts, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false},
+		{FieldMetricExplicitBounds, arrow.ListOf(arrow.PrimitiveTypes.Float64), false},
+		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false},
 	}
 	fields = append(fields, histogramFields...)
 
-	fields = append(fields, exemplarFields(23)...)
+	fields = append(fields, exemplarFields()...)
 
 	metadata := arrow.NewMetadata(
 		[]string{"iceberg_exporter.metrics_histogram_schema_version"},
@@ -572,30 +541,29 @@ func MetricsHistogramSchema() *arrow.Schema {
 	return buildSchema(fields, &metadata)
 }
 
-// ExponentialHistogramSchema returns the Arrow schema for OTLP exponential histogram metrics WITH field IDs.
+// MetricsExponentialHistogramSchema returns the Arrow schema for OTLP exponential histogram metrics with auto-assigned field IDs.
 // Exponential histograms use a logarithmic scale for bucket boundaries.
-// Fields: common (15) + exp-histogram-specific (11) + aggregation (1) + exemplars (6) = 33 fields
 func MetricsExponentialHistogramSchema() *arrow.Schema {
-	fields := commonMetricFields(1)
+	fields := commonMetricFields()
 
 	// ExponentialHistogram-specific fields
 	expHistogramFields := []FieldDef{
-		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false, 16},
-		{FieldMetricSum, arrow.PrimitiveTypes.Float64, true, 17},
-		{FieldMetricMin, arrow.PrimitiveTypes.Float64, true, 18},
-		{FieldMetricMax, arrow.PrimitiveTypes.Float64, true, 19},
-		{FieldMetricScale, arrow.PrimitiveTypes.Int32, false, 20},
-		{FieldMetricZeroCount, arrow.PrimitiveTypes.Uint64, false, 21},
-		{FieldMetricZeroThreshold, arrow.PrimitiveTypes.Float64, false, 22},
-		{FieldMetricPositiveOffset, arrow.PrimitiveTypes.Int32, false, 23},
-		{FieldMetricPositiveBuckets, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false, 24},
-		{FieldMetricNegativeOffset, arrow.PrimitiveTypes.Int32, false, 25},
-		{FieldMetricNegativeBuckets, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false, 26},
-		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false, 27},
+		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false},
+		{FieldMetricSum, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricMin, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricMax, arrow.PrimitiveTypes.Float64, true},
+		{FieldMetricScale, arrow.PrimitiveTypes.Int32, false},
+		{FieldMetricZeroCount, arrow.PrimitiveTypes.Uint64, false},
+		{FieldMetricZeroThreshold, arrow.PrimitiveTypes.Float64, false},
+		{FieldMetricPositiveOffset, arrow.PrimitiveTypes.Int32, false},
+		{FieldMetricPositiveBuckets, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false},
+		{FieldMetricNegativeOffset, arrow.PrimitiveTypes.Int32, false},
+		{FieldMetricNegativeBuckets, arrow.ListOf(arrow.PrimitiveTypes.Uint64), false},
+		{FieldMetricAggregationTemporality, arrow.BinaryTypes.String, false},
 	}
 	fields = append(fields, expHistogramFields...)
 
-	fields = append(fields, exemplarFields(28)...)
+	fields = append(fields, exemplarFields()...)
 
 	metadata := arrow.NewMetadata(
 		[]string{"iceberg_exporter.metrics_exponential_histogram_schema_version"},
@@ -604,18 +572,17 @@ func MetricsExponentialHistogramSchema() *arrow.Schema {
 	return buildSchema(fields, &metadata)
 }
 
-// SummarySchema returns the Arrow schema for OTLP summary metrics WITH field IDs.
+// MetricsSummarySchema returns the Arrow schema for OTLP summary metrics with auto-assigned field IDs.
 // Summary metrics represent pre-calculated quantiles (legacy metric type).
-// Fields: common (15) + summary-specific (4) = 19 fields
 func MetricsSummarySchema() *arrow.Schema {
-	fields := commonMetricFields(1)
+	fields := commonMetricFields()
 
 	// Summary-specific fields
 	summaryFields := []FieldDef{
-		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false, 16},
-		{FieldMetricSum, arrow.PrimitiveTypes.Float64, false, 17},
-		{FieldMetricQuantileValuesQuantile, arrow.ListOf(arrow.PrimitiveTypes.Float64), false, 18},
-		{FieldMetricQuantileValuesValue, arrow.ListOf(arrow.PrimitiveTypes.Float64), false, 19},
+		{FieldMetricCount, arrow.PrimitiveTypes.Uint64, false},
+		{FieldMetricSum, arrow.PrimitiveTypes.Float64, false},
+		{FieldMetricQuantileValuesQuantile, arrow.ListOf(arrow.PrimitiveTypes.Float64), false},
+		{FieldMetricQuantileValuesValue, arrow.ListOf(arrow.PrimitiveTypes.Float64), false},
 	}
 	fields = append(fields, summaryFields...)
 

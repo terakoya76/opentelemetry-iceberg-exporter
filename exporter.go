@@ -57,11 +57,27 @@ func (e *icebergExporter) start(ctx context.Context, _ component.Host) error {
 	}
 
 	// Create the Iceberg writer
-	w, err := NewIcebergWriter(ctx, writerCfg, e.logger)
+	w, err := NewIcebergWriter(ctx, writerCfg, e.allocator, e.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create Iceberg writer: %w", err)
 	}
 	e.writer = w
+
+	// Ensure all tables exist at startup
+	tables := []TableConfig{
+		{SignalType: "traces", Schema: iarrow.TracesSchema()},
+		{SignalType: "logs", Schema: iarrow.LogsSchema()},
+		{SignalType: iarrow.MetricTypeGauge.SignalType(), Schema: iarrow.GetMetricSchema(iarrow.MetricTypeGauge)},
+		{SignalType: iarrow.MetricTypeSum.SignalType(), Schema: iarrow.GetMetricSchema(iarrow.MetricTypeSum)},
+		{SignalType: iarrow.MetricTypeHistogram.SignalType(), Schema: iarrow.GetMetricSchema(iarrow.MetricTypeHistogram)},
+		{SignalType: iarrow.MetricTypeExponentialHistogram.SignalType(), Schema: iarrow.GetMetricSchema(iarrow.MetricTypeExponentialHistogram)},
+		{SignalType: iarrow.MetricTypeSummary.SignalType(), Schema: iarrow.GetMetricSchema(iarrow.MetricTypeSummary)},
+	}
+	if err := w.EnsureAllTables(ctx, tables); err != nil {
+		// Close writer on failure
+		_ = w.Close()
+		return fmt.Errorf("failed to ensure tables exist: %w", err)
+	}
 
 	e.logger.Info("Iceberg exporter started",
 		zap.String("storage_type", w.GetStorageType()),
@@ -80,8 +96,8 @@ func (e *icebergExporter) shutdown(_ context.Context) error {
 	return nil
 }
 
-// consumeTraces exports traces to Parquet.
-// Data is split by hour partition to ensure each Parquet file belongs to a single Iceberg partition.
+// consumeTraces exports traces to Iceberg.
+// The writer internally handles catalog vs FileIO mode.
 func (e *icebergExporter) consumeTraces(ctx context.Context, traces ptrace.Traces) error {
 	if traces.SpanCount() == 0 {
 		return nil
@@ -94,59 +110,23 @@ func (e *icebergExporter) consumeTraces(ctx context.Context, traces ptrace.Trace
 	}
 	defer record.Release()
 
-	// Extract service name from first span for partitioning
-	serviceName := extractServiceNameFromTraces(traces)
-
-	// Split by partition to ensure each file belongs to a single Iceberg partition
-	timezone := e.config.Partition.Timezone
-	if timezone == "" {
-		timezone = "UTC"
+	// Write using unified Write method (handles catalog/FileIO dispatch internally)
+	opts := WriteOptions{
+		SignalType: "traces",
+		Record:     record,
 	}
 
-	partitionedBatches, err := iarrow.SplitByPartition(record, iarrow.FieldTraceStartTimeUnixNano, e.allocator, timezone)
-	if err != nil {
-		return fmt.Errorf("failed to split traces by partition: %w", err)
-	}
-	defer func() {
-		for _, pb := range partitionedBatches {
-			pb.Release()
-		}
-	}()
-
-	// Write each partitioned batch to its own file
-	var totalBytes int
-	for _, pb := range partitionedBatches {
-		// Write to Parquet
-		data, err := iarrow.WriteParquet(pb.Batch, iarrow.ParquetWriterOptions{
-			Compression: e.getCompression(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to write Parquet: %w", err)
-		}
-
-		// Write using IcebergWriter with the partition timestamp
-		opts := WriteOptions{
-			SignalType:  "traces",
-			Schema:      pb.Batch.Schema(),
-			Data:        data,
-			RecordCount: pb.RecordCount,
-			Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-		}
-
-		if err := e.writer.Write(ctx, opts); err != nil {
-			return fmt.Errorf("failed to write traces for partition %v: %w", pb.Timestamp, err)
-		}
-
-		totalBytes += len(data)
+	if err := e.writer.Write(ctx, opts); err != nil {
+		return fmt.Errorf("failed to write traces: %w", err)
 	}
 
-	e.logTracesExportPartitioned(traces, totalBytes, len(partitionedBatches), serviceName)
+	e.logTracesExport(traces, int(record.NumRows()))
 
 	return nil
 }
 
-// consumeMetrics exports metrics to Parquet with separated tables per metric type.
-// Each metric type is split by hour partition to ensure each Parquet file belongs to a single Iceberg partition.
+// consumeMetrics exports metrics to Iceberg with separated tables per metric type.
+// The writer internally handles catalog vs FileIO mode.
 func (e *icebergExporter) consumeMetrics(ctx context.Context, metrics pmetric.Metrics) error {
 	if metrics.DataPointCount() == 0 {
 		return nil
@@ -159,78 +139,39 @@ func (e *icebergExporter) consumeMetrics(ctx context.Context, metrics pmetric.Me
 	}
 	defer metricRecords.Release()
 
-	// Extract service name from first metric for partitioning
-	serviceName := extractServiceNameFromMetrics(metrics)
-
-	// Get timezone for partition splitting
-	timezone := e.config.Partition.Timezone
-	if timezone == "" {
-		timezone = "UTC"
-	}
-
-	var totalBytes int
 	var totalRecords int64
-	var totalPartitions int
+	var writeErr error
 
-	// Write each metric type to its own table, splitting by partition
+	// Write each metric type using unified Write method
 	metricRecords.ForEach(func(metricType iarrow.MetricType, record arrow.RecordBatch) {
-		// Split by partition to ensure each file belongs to a single Iceberg partition
-		partitionedBatches, splitErr := iarrow.SplitByPartition(record, iarrow.FieldMetricTimeUnixNano, e.allocator, timezone)
-		if splitErr != nil {
-			e.logger.Error("failed to split metrics by partition",
-				zap.String("metric_type", string(metricType)),
-				zap.Error(splitErr))
+		if writeErr != nil {
+			return // Skip remaining on first error
+		}
+
+		opts := WriteOptions{
+			SignalType: metricType.SignalType(),
+			Record:     record,
+		}
+
+		if err := e.writer.Write(ctx, opts); err != nil {
+			writeErr = fmt.Errorf("failed to write metrics %s: %w", metricType, err)
 			return
 		}
-		defer func() {
-			for _, pb := range partitionedBatches {
-				pb.Release()
-			}
-		}()
 
-		// Write each partitioned batch
-		for _, pb := range partitionedBatches {
-			// Write to Parquet
-			data, writeErr := iarrow.WriteParquet(pb.Batch, iarrow.ParquetWriterOptions{
-				Compression: e.getCompression(),
-			})
-			if writeErr != nil {
-				e.logger.Error("failed to write Parquet for metric type",
-					zap.String("metric_type", string(metricType)),
-					zap.Error(writeErr))
-				continue
-			}
-
-			// Write using IcebergWriter with the partition timestamp
-			opts := WriteOptions{
-				SignalType:  metricType.SignalType(),
-				Schema:      pb.Batch.Schema(),
-				Data:        data,
-				RecordCount: pb.RecordCount,
-				Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-			}
-
-			if writeErr := e.writer.Write(ctx, opts); writeErr != nil {
-				e.logger.Error("failed to write metrics",
-					zap.String("metric_type", string(metricType)),
-					zap.Time("partition", pb.Timestamp),
-					zap.Error(writeErr))
-				continue
-			}
-
-			totalBytes += len(data)
-			totalRecords += pb.RecordCount
-		}
-		totalPartitions += len(partitionedBatches)
+		totalRecords += record.NumRows()
 	})
 
-	e.logMetricsExportPartitioned(metrics, totalBytes, totalRecords, totalPartitions, serviceName)
+	if writeErr != nil {
+		return writeErr
+	}
+
+	e.logMetricsExport(metrics, totalRecords)
 
 	return nil
 }
 
-// consumeLogs exports logs to Parquet.
-// Data is split by hour partition to ensure each Parquet file belongs to a single Iceberg partition.
+// consumeLogs exports logs to Iceberg.
+// The writer internally handles catalog vs FileIO mode.
 func (e *icebergExporter) consumeLogs(ctx context.Context, logs plog.Logs) error {
 	if logs.LogRecordCount() == 0 {
 		return nil
@@ -243,69 +184,19 @@ func (e *icebergExporter) consumeLogs(ctx context.Context, logs plog.Logs) error
 	}
 	defer record.Release()
 
-	// Extract service name from first log for partitioning
-	serviceName := extractServiceNameFromLogs(logs)
-
-	// Split by partition to ensure each file belongs to a single Iceberg partition
-	timezone := e.config.Partition.Timezone
-	if timezone == "" {
-		timezone = "UTC"
+	// Write using unified Write method (handles catalog/FileIO dispatch internally)
+	opts := WriteOptions{
+		SignalType: "logs",
+		Record:     record,
 	}
 
-	partitionedBatches, err := iarrow.SplitByPartition(record, iarrow.FieldLogTimeUnixNano, e.allocator, timezone)
-	if err != nil {
-		return fmt.Errorf("failed to split logs by partition: %w", err)
-	}
-	defer func() {
-		for _, pb := range partitionedBatches {
-			pb.Release()
-		}
-	}()
-
-	// Write each partitioned batch to its own file
-	var totalBytes int
-	for _, pb := range partitionedBatches {
-		// Write to Parquet
-		data, err := iarrow.WriteParquet(pb.Batch, iarrow.ParquetWriterOptions{
-			Compression: e.getCompression(),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to write Parquet: %w", err)
-		}
-
-		// Write using IcebergWriter with the partition timestamp
-		opts := WriteOptions{
-			SignalType:  "logs",
-			Schema:      pb.Batch.Schema(),
-			Data:        data,
-			RecordCount: pb.RecordCount,
-			Timestamp:   pb.Timestamp, // Use the partition timestamp, not time.Now()
-		}
-
-		if err := e.writer.Write(ctx, opts); err != nil {
-			return fmt.Errorf("failed to write logs for partition %v: %w", pb.Timestamp, err)
-		}
-
-		totalBytes += len(data)
+	if err := e.writer.Write(ctx, opts); err != nil {
+		return fmt.Errorf("failed to write logs: %w", err)
 	}
 
-	e.logLogsExportPartitioned(logs, totalBytes, len(partitionedBatches), serviceName)
+	e.logLogsExport(logs, int(record.NumRows()))
 
 	return nil
-}
-
-// getCompression returns the compression setting from storage config.
-func (e *icebergExporter) getCompression() string {
-	switch e.config.Storage.Type {
-	case "s3", "":
-		return e.config.Storage.S3.GetCompression()
-	case "r2":
-		return e.config.Storage.R2.GetCompression()
-	case "filesystem":
-		return e.config.Storage.Filesystem.GetCompression()
-	default:
-		return "snappy"
-	}
 }
 
 // Helper functions
@@ -346,62 +237,55 @@ func extractServiceNameFromLogs(logs plog.Logs) string {
 	return ""
 }
 
-// logTracesExportPartitioned logs trace export information with partition details.
-func (e *icebergExporter) logTracesExportPartitioned(traces ptrace.Traces, totalBytes int, partitionCount int, serviceName string) {
+// logTracesExport logs trace export information.
+func (e *icebergExporter) logTracesExport(traces ptrace.Traces, recordCount int) {
 	if e.logger.IsNormal() {
-		// LevelNormal: log basic counts at Info level
 		e.logger.Info("Traces exported",
 			zap.Int("spans", traces.SpanCount()),
-			zap.Int("partitions", partitionCount),
+			zap.Int("records", recordCount),
 		)
 	} else if e.logger.IsDetailed() {
-		// LevelDetailed: log full details at Info level
+		serviceName := extractServiceNameFromTraces(traces)
 		e.logger.Info("Traces exported",
 			zap.Int("spans", traces.SpanCount()),
-			zap.Int("bytes", totalBytes),
-			zap.Int("partitions", partitionCount),
+			zap.Int("records", recordCount),
 			zap.String("service_name", serviceName),
 			zap.Int("resource_spans", traces.ResourceSpans().Len()),
 		)
 	}
 }
 
-// logMetricsExportPartitioned logs metrics export information with partition details.
-func (e *icebergExporter) logMetricsExportPartitioned(metrics pmetric.Metrics, totalBytes int, totalRecords int64, totalPartitions int, serviceName string) {
+// logMetricsExport logs metrics export information.
+func (e *icebergExporter) logMetricsExport(metrics pmetric.Metrics, totalRecords int64) {
 	if e.logger.IsNormal() {
-		// LevelNormal: log basic counts at Info level
 		e.logger.Info("Metrics exported",
 			zap.Int("datapoints", metrics.DataPointCount()),
-			zap.Int("partitions", totalPartitions),
+			zap.Int64("records", totalRecords),
 		)
 	} else if e.logger.IsDetailed() {
-		// LevelDetailed: log full details at Info level
+		serviceName := extractServiceNameFromMetrics(metrics)
 		e.logger.Info("Metrics exported",
 			zap.Int("datapoints", metrics.DataPointCount()),
 			zap.Int("metric_count", metrics.MetricCount()),
-			zap.Int64("records_written", totalRecords),
-			zap.Int("bytes", totalBytes),
-			zap.Int("partitions", totalPartitions),
+			zap.Int64("records", totalRecords),
 			zap.String("service_name", serviceName),
 			zap.Int("resource_metrics", metrics.ResourceMetrics().Len()),
 		)
 	}
 }
 
-// logLogsExportPartitioned logs log export information with partition details.
-func (e *icebergExporter) logLogsExportPartitioned(logs plog.Logs, totalBytes int, partitionCount int, serviceName string) {
+// logLogsExport logs log export information.
+func (e *icebergExporter) logLogsExport(logs plog.Logs, recordCount int) {
 	if e.logger.IsNormal() {
-		// LevelNormal: log basic counts at Info level
 		e.logger.Info("Logs exported",
 			zap.Int("records", logs.LogRecordCount()),
-			zap.Int("partitions", partitionCount),
+			zap.Int("written", recordCount),
 		)
 	} else if e.logger.IsDetailed() {
-		// LevelDetailed: log full details at Info level
+		serviceName := extractServiceNameFromLogs(logs)
 		e.logger.Info("Logs exported",
 			zap.Int("records", logs.LogRecordCount()),
-			zap.Int("bytes", totalBytes),
-			zap.Int("partitions", partitionCount),
+			zap.Int("written", recordCount),
 			zap.String("service_name", serviceName),
 			zap.Int("resource_logs", logs.ResourceLogs().Len()),
 		)

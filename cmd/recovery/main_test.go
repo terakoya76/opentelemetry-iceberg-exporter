@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/terakoya76/opentelemetry-iceberg-exporter/internal/iceberg"
 )
 
 func TestBuildStorageConfig_S3(t *testing.T) {
@@ -301,7 +303,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "valid REST catalog with URI only",
 			params: CatalogParams{
-				Type:      "rest",
+				Type:      iceberg.CatalogTypeRest,
 				URI:       "http://catalog:8181",
 				Namespace: "otel",
 			},
@@ -310,7 +312,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "valid REST catalog with all params",
 			params: CatalogParams{
-				Type:      "rest",
+				Type:      iceberg.CatalogTypeRest,
 				URI:       "http://catalog:8181",
 				Token:     "bearer-token-123",
 				Warehouse: "s3://my-bucket/warehouse",
@@ -321,7 +323,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "missing catalog URI",
 			params: CatalogParams{
-				Type:      "rest",
+				Type:      iceberg.CatalogTypeRest,
 				Namespace: "otel",
 			},
 			wantErr:     true,
@@ -330,7 +332,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "empty catalog URI",
 			params: CatalogParams{
-				Type:      "rest",
+				Type:      iceberg.CatalogTypeRest,
 				URI:       "",
 				Namespace: "otel",
 			},
@@ -340,7 +342,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "REST with only URI",
 			params: CatalogParams{
-				Type: "rest",
+				Type: iceberg.CatalogTypeRest,
 				URI:  "http://localhost:8181",
 			},
 			wantErr: false,
@@ -348,7 +350,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 		{
 			name: "REST URI with whitespace only",
 			params: CatalogParams{
-				Type: "rest",
+				Type: iceberg.CatalogTypeRest,
 				URI:  "   ",
 			},
 			wantErr: false,
@@ -364,7 +366,7 @@ func TestBuildCatalogConfig_REST(t *testing.T) {
 				assert.Contains(t, err.Error(), tc.errContains)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, "rest", cfg.Type)
+				assert.Equal(t, iceberg.CatalogTypeRest, cfg.Type)
 				assert.Equal(t, tc.params.URI, cfg.REST.URI)
 				assert.Equal(t, tc.params.Namespace, cfg.Namespace)
 			}

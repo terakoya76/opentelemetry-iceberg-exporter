@@ -12,25 +12,24 @@ An OpenTelemetry Collector exporter that writes telemetry data (traces, metrics,
 - **Compression**: Snappy, gzip, zstd, or none
 - **OTEL-compatible schema**: Field names match OpenTelemetry proto definitions
 - **Iceberg field IDs**: Parquet files include field ID metadata for Iceberg compatibility
-- **Best-effort pattern**: Data durability first, catalog registration second
 
 ## Architecture
 
 ```mermaid
 graph LR
     A["OTLP Receiver<br/>(traces/logs/metrics)"]
-    B["Iceberg Exporter<br/><i>Arrow → Parquet</i>"]
-    C["Storage<br/>(S3/R2/Local)"]
-    D["Iceberg Catalog<br/>(REST)"]
+    B["Iceberg Exporter<br/><i>OTEL → Arrow</i>"]
+    C["Iceberg Catalog<br/>(REST)"]
+    D["Storage<br/>(S3/R2/Local)"]
 
     A --> B
-    B --> C
-    B -.->|optional| D
+    B -->|catalog mode| C --> D
+    B -.->|no catalog| D
 ```
 
-**Best-effort write pattern:**
-1. Data is ALWAYS written to storage first (ensures durability)
-2. Catalog registration is attempted afterward (failures are logged, not propagated)
+**Write paths:**
+- **Catalog mode** (REST): Exporter passes Arrow records to the Iceberg Catalog, which handles partitioning, Parquet conversion, storage writes, and metadata registration atomically via iceberg-go.
+- **No catalog mode**: Exporter converts Arrow to Parquet internally and writes directly to storage via FileIO.
 
 ## Project Structure
 
@@ -67,6 +66,7 @@ graph LR
 │   │   ├── fileio_factory.go # FileIO factory
 │   │   ├── auth.go         # Authentication handling
 │   │   ├── partition.go    # Partition path generation
+│   │   ├── errors.go       # Error types and permanent error classification
 │   │   └── http.go         # HTTP utilities for catalog communication
 │   ├── logger/             # Logging utilities
 │   │   └── logger.go       # Verbosity-based logging wrapper
@@ -596,9 +596,9 @@ cat <GHCR_PAT> | docker login ghcr.io -u terakoya76 --password-stdin
 
 make docker-build
 make docker-tag
-make docker-tag DOCKER_TAG=v0.142.0.6
+make docker-tag DOCKER_TAG=v0.142.0.7
 make docker-push
-make docker-push DOCKER_TAG=v0.142.0.6
+make docker-push DOCKER_TAG=v0.142.0.7
 ```
 
 ## License

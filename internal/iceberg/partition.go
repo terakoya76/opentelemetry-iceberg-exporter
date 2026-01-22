@@ -106,14 +106,6 @@ type PathConfig struct {
 	Timezone string
 }
 
-// DefaultPathConfig returns the default path configuration.
-func DefaultPathConfig() PathConfig {
-	return PathConfig{
-		Granularity: constants.GranularityHourly,
-		Timezone:    "UTC",
-	}
-}
-
 // PathOptions contains options for generating a file path.
 type PathOptions struct {
 	// TableName is the Iceberg table name.

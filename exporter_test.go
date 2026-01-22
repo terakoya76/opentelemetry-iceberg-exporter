@@ -130,7 +130,7 @@ func TestConfigValidate(t *testing.T) {
 				},
 			},
 			Catalog: iceberg.CatalogConfig{
-				Type: "rest",
+				Type: iceberg.CatalogTypeRest,
 				REST: iceberg.RESTCatalogConfig{
 					// Missing required URI
 				},
@@ -495,74 +495,5 @@ func TestIcebergExporterConsumeMetrics(t *testing.T) {
 
 		err := exp.consumeMetrics(ctx, metrics)
 		assert.NoError(t, err)
-	})
-}
-
-func TestGetCompression(t *testing.T) {
-	t.Run("S3 storage", func(t *testing.T) {
-		exp := &icebergExporter{
-			config: &Config{
-				Storage: iceberg.FileIOConfig{
-					Type: "s3",
-					S3: iceberg.S3FileIOConfig{
-						Compression: "zstd",
-					},
-				},
-			},
-		}
-		assert.Equal(t, "zstd", exp.getCompression())
-	})
-
-	t.Run("R2 storage", func(t *testing.T) {
-		exp := &icebergExporter{
-			config: &Config{
-				Storage: iceberg.FileIOConfig{
-					Type: "r2",
-					R2: iceberg.R2FileIOConfig{
-						Compression: "gzip",
-					},
-				},
-			},
-		}
-		assert.Equal(t, "gzip", exp.getCompression())
-	})
-
-	t.Run("Filesystem storage", func(t *testing.T) {
-		exp := &icebergExporter{
-			config: &Config{
-				Storage: iceberg.FileIOConfig{
-					Type: "filesystem",
-					Filesystem: iceberg.LocalFileIOConfig{
-						Compression: "none",
-					},
-				},
-			},
-		}
-		assert.Equal(t, "none", exp.getCompression())
-	})
-
-	t.Run("Unknown storage uses snappy", func(t *testing.T) {
-		exp := &icebergExporter{
-			config: &Config{
-				Storage: iceberg.FileIOConfig{
-					Type: "unknown",
-				},
-			},
-		}
-		assert.Equal(t, "snappy", exp.getCompression())
-	})
-
-	t.Run("Empty type uses S3 default", func(t *testing.T) {
-		exp := &icebergExporter{
-			config: &Config{
-				Storage: iceberg.FileIOConfig{
-					Type: "",
-					S3: iceberg.S3FileIOConfig{
-						Compression: "lz4",
-					},
-				},
-			},
-		}
-		assert.Equal(t, "lz4", exp.getCompression())
 	})
 }

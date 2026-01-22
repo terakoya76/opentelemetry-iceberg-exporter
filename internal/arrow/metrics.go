@@ -26,17 +26,6 @@ const (
 	MetricTypeSummary MetricType = "summary"
 )
 
-// AllMetricTypes returns all supported metric types in order.
-func AllMetricTypes() []MetricType {
-	return []MetricType{
-		MetricTypeGauge,
-		MetricTypeSum,
-		MetricTypeHistogram,
-		MetricTypeExponentialHistogram,
-		MetricTypeSummary,
-	}
-}
-
 // String returns the string representation of the metric type.
 func (mt MetricType) String() string {
 	return string(mt)

@@ -16,6 +16,7 @@ services:
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-minioadmin}
     command: --config /app/config.yaml
+    restart: on-failure
     volumes:
       - ./otel-config.yaml:/app/config.yaml
       - iceberg-queue:/var/lib/otelcol/iceberg-queue
@@ -36,9 +37,12 @@ services:
   # Nessie Iceberg REST Catalog
   nessie:
     image: ghcr.io/projectnessie/nessie:latest
+    hostname: nessie
     ports:
       - "19120:19120"
     environment:
+      # Disable Java DNS caching to ensure Docker DNS resolution works properly
+      - JAVA_OPTS=-Dnetworkaddress.cache.ttl=0 -Dnetworkaddress.cache.negative.ttl=0
       # Nessie version store (IN_MEMORY for demo, use JDBC/ROCKSDB for persistence)
       - nessie.version.store.type=IN_MEMORY
       - quarkus.http.port=19120
@@ -50,30 +54,34 @@ services:
       - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000
       - nessie.catalog.service.s3.default-options.path-style-access=true
       - nessie.catalog.service.s3.default-options.region=us-east-1
-      # Explicitly set auth-type to STATIC for MinIO credentials
+      # STATIC auth type for direct credentials (required for MinIO)
       - nessie.catalog.service.s3.default-options.auth-type=STATIC
       # MinIO credentials using Quarkus config secrets
-      # The URN points to nessie.catalog.secrets.access-key, which resolves to:
-      # - nessie.catalog.secrets.access-key.name (access key ID)
-      # - nessie.catalog.secrets.access-key.secret (secret access key)
-      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:nessie.catalog.secrets.access-key
-      - nessie.catalog.secrets.access-key.name=minioadmin
-      - nessie.catalog.secrets.access-key.secret=minioadmin
+      # Using simple secret name (without nested periods) for reliable resolution
+      - nessie.catalog.service.s3.default-options.access-key=urn:nessie-secret:quarkus:minio-creds
+      - minio-creds.name=minioadmin
+      - minio-creds.secret=minioadmin
+    restart: on-failure
     depends_on:
+      # Depend on minio directly to ensure DNS resolution works
       minio:
         condition: service_healthy
+      # Also depend on minio-init to ensure bucket exists
+      minio-init:
+        condition: service_completed_successfully
     networks:
       - demo-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v2/config"]
+      test: ["CMD", "curl", "-f", "http://localhost:19120/iceberg/v1/config?warehouse=warehouse"]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 10s
+      retries: 15
+      start_period: 15s
 
   # MinIO for local S3-compatible storage (for testing)
   minio:
     image: minio/minio:latest
+    hostname: minio
     ports:
       - "9000:9000"
       - "9001:9001"
