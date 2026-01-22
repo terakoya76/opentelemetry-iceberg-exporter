@@ -1,7 +1,7 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
-ARG OCB_VERSION=0.142.0
+ARG OCB_VERSION=0.143.0
 
 WORKDIR /build
 

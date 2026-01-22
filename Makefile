@@ -14,7 +14,7 @@ DOCKER_REGISTRY=ghcr.io/terakoya76/opentelemetry-iceberg-exporter
 DOCKER_TAG=latest
 
 # OpenTelemetry Collector Builder version (must match otelcol_version in builder-config.yaml)
-OCB_VERSION=0.142.0
+OCB_VERSION=0.143.0
 OCB=$(shell which builder 2>/dev/null || echo $(GOPATH)/bin/builder)
 
 all: build
