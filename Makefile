@@ -17,6 +17,11 @@ DOCKER_TAG=latest
 OCB_VERSION=0.143.0
 OCB=$(shell which builder 2>/dev/null || echo $(GOPATH)/bin/builder)
 
+# golangci-lint v1 cannot type-check modules built for Go 1.25+, so pin a v2 release
+# and run it via `go run` to avoid depending on whatever version is installed globally.
+GOLANGCI_LINT_VERSION=v2.15.0
+GOLANGCI_LINT=$(GOCMD) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
 all: build
 
 # Install OpenTelemetry Collector Builder
@@ -43,7 +48,7 @@ clean:
 	rm -rf dist/
 
 lint:
-	golangci-lint run ./...
+	$(GOLANGCI_LINT) run ./...
 
 fmt:
 	gofmt -s -w .
